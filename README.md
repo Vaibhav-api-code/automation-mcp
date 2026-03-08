@@ -94,12 +94,12 @@ Or manually enable in: **System Settings** → **Privacy & Security** → **Acce
 
 ### 🔧 System & Monitoring
 
-- `processManager` - List running processes or kill by PID/name with signal control
+- `processManager` - List running processes or send TERM/KILL by PID/name
 - `notification` - Send macOS toast notifications with title and message
 - `ocr` - Read text from screen regions using macOS Vision framework OCR
 - `waitForChange` - Wait until a screen region visually changes beyond a threshold
 - `imageMatch` - Find a template image on screen using visual template matching
-- `multiMonitor` - Get information about all connected displays (resolution, position, scaling)
+- `multiMonitor` - Get information about all connected displays (name, resolution, and display flags)
 
 ## 🔒 Security & Permissions
 

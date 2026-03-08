@@ -719,6 +719,13 @@ server.addTool({
       captureArgs.push(tmpScreen);
       execFileSync("screencapture", captureArgs, { timeout: 10000 });
     } catch (error: any) {
+      try {
+        if (fs.existsSync(tmpScreen)) {
+          fs.unlinkSync(tmpScreen);
+        }
+      } catch {
+        // Ignore cleanup errors to preserve original failure context
+      }
       throw new Error(`Failed to capture screen: ${error.message}`);
     }
 
@@ -1019,11 +1026,11 @@ server.addTool({
       .string()
       .optional()
       .describe("Process name to filter/kill"),
-    pid: z.number().optional().describe("Process ID to kill"),
+    pid: z.number().min(1).optional().describe("Process ID to kill (must be positive)"),
     signal: z
       .enum(["TERM", "KILL"])
       .default("TERM")
-      .describe("Signal to send: TERM (graceful) or KILL (force)"),
+      .describe("Signal to send: TERM (graceful shutdown) or KILL (force terminate)"),
   }),
   execute: async ({ action, name, pid, signal }) => {
     const { execFileSync } = child_process;
@@ -1044,8 +1051,8 @@ server.addTool({
             ? `Processes matching "${name}":\n${filtered.join("\n")}`
             : `No processes found matching "${name}".`;
         }
-        // Return top 30 processes by default
-        return `Running processes (top 30):\n${lines.slice(0, 31).join("\n")}`;
+        // Return first 30 lines (header + 29 processes) by default
+        return `Running processes (first 30 entries from ps aux):\n${lines.slice(0, 31).join("\n")}`;
       } catch (error: any) {
         throw new Error(`Failed to list processes: ${error.message}`);
       }
@@ -1097,9 +1104,9 @@ server.addTool({
     subtitle: z.string().optional().describe("Optional subtitle"),
     sound: z
       .string()
-      .default("default")
+      .optional()
       .describe(
-        "Sound name (e.g., 'default', 'Basso', 'Blow', 'Bottle', 'Frog', 'Funk', 'Glass', 'Hero', 'Morse', 'Ping', 'Pop', 'Purr', 'Sosumi', 'Submarine', 'Tink')"
+        "Optional sound name (e.g., 'default', 'Basso', 'Blow', 'Bottle', 'Frog', 'Funk', 'Glass', 'Hero', 'Morse', 'Ping', 'Pop', 'Purr', 'Sosumi', 'Submarine', 'Tink'); omit or use 'none' for no sound"
       ),
   }),
   execute: async ({ title, message, subtitle, sound }) => {
@@ -1142,7 +1149,7 @@ server.addTool({
 server.addTool({
   name: "ocr",
   description:
-    "Reads text from a screen region or image file using macOS Vision framework OCR. Specify a region {x, y, width, height} to capture and read from screen, or provide an imagePath to read from a file.",
+    "Reads text from a screen region or image file using macOS Vision framework OCR. Specify a region {x, y, width, height} to capture and read from screen, or provide an imagePath to read from a file. If both are provided, imagePath takes precedence.",
   parameters: z.object({
     region: z
       .object({
@@ -1278,7 +1285,7 @@ server.addTool({
     timeout: z
       .number()
       .default(30000)
-      .describe("Timeout in milliseconds"),
+      .describe("Timeout in milliseconds (capped at 60000)"),
     threshold: z
       .number()
       .min(0)
@@ -1369,26 +1376,44 @@ server.addTool({
         const pngData = captureRegion();
         const current = getPixelData(pngData);
 
-        // Compare pixel data - read BMP header fields for correct pixel access
-        const minLen = Math.min(baseline.length, current.length);
+        // Compare pixel data using proper BMP row-stride (rows are padded to 4-byte boundary)
         const headerSize =
           baseline.length >= 14 ? baseline.readUInt32LE(10) : 54;
-        // Read bits-per-pixel from BMP DIB header (bytes 28-29, LE uint16)
         const bpp =
           baseline.length >= 30 ? baseline.readUInt16LE(28) : 32;
-        const bytesPerPixel = bpp / 8; // 3 for 24-bit, 4 for 32-bit
-        const pixelLen = minLen - headerSize;
-        if (pixelLen <= 0 || bytesPerPixel < 3) continue;
+        const bytesPerPixel = bpp / 8;
+        if (baseline.length < 26 || bytesPerPixel < 3) continue;
 
+        const width = baseline.readInt32LE(18);
+        const heightRaw = baseline.readInt32LE(22);
+        const height = Math.abs(heightRaw);
+        if (width <= 0 || height <= 0) continue;
+
+        // BMP rows are padded to 4-byte boundary
+        const rowSize = Math.floor((bpp * width + 31) / 32) * 4;
+        const pixelDataLen = Math.min(
+          baseline.length - headerSize,
+          current.length - headerSize
+        );
+        if (pixelDataLen <= 0) continue;
+
+        const rows = Math.min(height, Math.floor(pixelDataLen / rowSize));
         let diffCount = 0;
-        const totalSamples = Math.floor(pixelLen / bytesPerPixel);
-        for (let i = headerSize; i < minLen - (bytesPerPixel - 1); i += bytesPerPixel) {
-          if (
-            baseline[i] !== current[i] ||
-            baseline[i + 1] !== current[i + 1] ||
-            baseline[i + 2] !== current[i + 2]
-          ) {
-            diffCount++;
+        let totalSamples = 0;
+
+        for (let y = 0; y < rows; y++) {
+          const rowOffset = headerSize + y * rowSize;
+          for (let x = 0; x < width; x++) {
+            const idx = rowOffset + x * bytesPerPixel;
+            if (idx + 2 >= baseline.length || idx + 2 >= current.length) break;
+            if (
+              baseline[idx] !== current[idx] ||
+              baseline[idx + 1] !== current[idx + 1] ||
+              baseline[idx + 2] !== current[idx + 2]
+            ) {
+              diffCount++;
+            }
+            totalSamples++;
           }
         }
         const diffRatio =
@@ -1416,7 +1441,7 @@ server.addTool({
 server.addTool({
   name: "multiMonitor",
   description:
-    "Returns information about all connected displays including resolution, Retina scaling, and position. Useful for multi-monitor setups.",
+    "Returns information about all connected displays including name, resolution, and whether they are Retina, primary, or mirrored. Useful for multi-monitor setups.",
   parameters: z.object({}),
   execute: async () => {
     const { execFileSync } = child_process;
