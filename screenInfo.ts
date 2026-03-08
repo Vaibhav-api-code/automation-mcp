@@ -1,12 +1,12 @@
 import { FastMCP, imageContent } from "fastmcp";
 import { z } from "zod";
 import * as child_process from "child_process";
-const nutjs = require("./nutjs/nut.js/core/nut.js/dist/index.js");
-const { screen } = nutjs;
 
 export const screenInfo = async (nutjsAvailable: boolean) => {
   if (nutjsAvailable) {
     try {
+      const nutjs = require("./nutjs/nut.js/core/nut.js/dist/index.js");
+      const { screen } = nutjs;
       const width = await screen.width();
       const height = await screen.height();
       return `Screen dimensions: ${width}x${height} pixels`;
@@ -15,11 +15,13 @@ export const screenInfo = async (nutjsAvailable: boolean) => {
     }
   }
 
-  // Fallback method using system_profiler
+  // Fallback method using system_profiler (no shell pipe)
   try {
     const output = child_process
-      .execSync("system_profiler SPDisplaysDataType | grep Resolution")
-      .toString();
+      .execFileSync("system_profiler", ["SPDisplaysDataType"], {
+        encoding: "utf-8",
+        timeout: 10000,
+      });
     const match = output.match(/(\d+) x (\d+)/);
     if (match) {
       return `Screen dimensions: ${match[1]}x${match[2]} pixels`;

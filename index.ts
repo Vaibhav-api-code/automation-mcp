@@ -75,8 +75,16 @@ console.log = (...args: any[]) => {
     originalConsoleLog(...args);
   }
 };
-console.error = () => {}; // Suppress all error logs from FastMCP
-console.warn = () => {}; // Suppress all warning logs from FastMCP
+console.error = (...args: any[]) => {
+  // Suppress only FastMCP internal errors; pass through all others
+  if (args[0] && typeof args[0] === "string" && args[0].includes("FastMCP")) return;
+  originalConsoleError(...args);
+};
+console.warn = (...args: any[]) => {
+  // Suppress only FastMCP internal warnings; pass through all others
+  if (args[0] && typeof args[0] === "string" && args[0].includes("FastMCP")) return;
+  originalConsoleWarn(...args);
+};
 
 const server = new FastMCP({
   name: "Local Automation MCP",
@@ -1091,9 +1099,8 @@ server.addTool({
           });
           return `Sent ${signal} signal to process ${pid}.`;
         }
-        // Kill by name using pkill with -x for exact match (prevents regex injection)
-        const safeName = name!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        execFileSync("pkill", [sigFlag, "-x", safeName], {
+        // Kill by name using pkill with -x for exact match (no regex, no escaping needed)
+        execFileSync("pkill", [sigFlag, "-x", name!], {
           encoding: "utf-8",
           timeout: 5000,
         });
@@ -2835,7 +2842,11 @@ server.addTool({
       args.push("-name", query);
     } else if (searchType === "content") {
       // Explicit content predicate for file contents search
-      const escaped = query.replace(/'/g, "\\'");
+      const escaped = query
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\*/g, "\\*")
+        .replace(/'/g, "\\'");
       args.push(`kMDItemTextContent == "*${escaped}*"cd`);
     } else {
       // Raw mdfind query syntax (e.g., "kMDItemKind == 'PDF Document'")
