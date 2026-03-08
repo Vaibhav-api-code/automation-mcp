@@ -1635,7 +1635,7 @@ server.addTool({
         });
         const match = output.match(/brightness\s+([\d.]+)/);
         if (match) {
-          const pct = Math.round(parseFloat(match[1]) * 100);
+          const pct = Math.round(parseFloat(match[1]!) * 100);
           return `Display brightness: ${pct}% (${match[1]})`;
         }
         return `Brightness output: ${output.trim()}`;
@@ -1761,16 +1761,16 @@ server.addTool({
     // menuPath[0] = top-level menu, menuPath[1..n-1] = submenus, menuPath[n] = item
     if (menuPath.length === 1) {
       // Just clicking a top-level menu (unusual but supported)
-      const escMenu = escapeForAppleScript(menuPath[0]);
+      const escMenu = escapeForAppleScript(menuPath[0]!);
       runAppleScript(
         `tell application "System Events" to tell process "${escApp}" to click menu bar item "${escMenu}" of menu bar 1`
       );
-      return `Clicked menu bar item "${menuPath[0]}" in ${appName}.`;
+      return `Clicked menu bar item "${menuPath[0]!}" in ${appName}.`;
     }
 
     // Build from innermost to outermost
-    const topMenu = escapeForAppleScript(menuPath[0]);
-    const targetItem = escapeForAppleScript(menuPath[menuPath.length - 1]);
+    const topMenu = escapeForAppleScript(menuPath[0]!);
+    const targetItem = escapeForAppleScript(menuPath[menuPath.length - 1]!);
 
     let script: string;
     if (menuPath.length === 2) {
@@ -1781,7 +1781,7 @@ server.addTool({
       // Build the chain from the target item back up
       let chain = `menu item "${targetItem}"`;
       for (let i = menuPath.length - 2; i >= 1; i--) {
-        const sub = escapeForAppleScript(menuPath[i]);
+        const sub = escapeForAppleScript(menuPath[i]!);
         chain = `${chain} of menu 1 of menu item "${sub}"`;
       }
       chain = `${chain} of menu 1 of menu bar item "${topMenu}" of menu bar 1`;
@@ -2178,7 +2178,7 @@ server.addTool({
         { encoding: "utf-8", timeout: 5000 }
       );
       const wifiMatch = hwPorts.match(/Hardware Port: Wi-Fi\nDevice: (\w+)/);
-      const wifiDev = wifiMatch ? wifiMatch[1] : "en0";
+      const wifiDev = wifiMatch ? wifiMatch[1]! : "en0";
       const wifi = execFileSync(
         "networksetup",
         ["-getairportnetwork", wifiDev],
@@ -2527,7 +2527,17 @@ function parseElementOutput(rawOutput: string): UIElement[] {
   for (const line of lines) {
     const parts = line.split("|||");
     if (parts.length < 11) continue;
-    const [pathStr, role, title, desc, help, value, enabled, posX, posY, sizeW, sizeH] = parts;
+    const pathStr = parts[0] ?? "";
+    const role = parts[1] ?? "";
+    const title = parts[2] ?? "";
+    const desc = parts[3] ?? "";
+    const help = parts[4] ?? "";
+    const value = parts[5] ?? "";
+    const enabled = parts[6] ?? "";
+    const posX = parts[7] ?? "0";
+    const posY = parts[8] ?? "0";
+    const sizeW = parts[9] ?? "0";
+    const sizeH = parts[10] ?? "0";
     const parsedPosX = parseInt(posX);
     const parsedPosY = parseInt(posY);
     const parsedSizeW = parseInt(sizeW);
@@ -2842,7 +2852,13 @@ end tell`;
         .split("\n")
         .filter((s) => s.includes("|||"))
         .map((line) => {
-          const [idx, name, px, py, sw, sh] = line.split("|||");
+          const parts = line.split("|||");
+          const idx = parts[0] ?? "0";
+          const name = parts[1] ?? "";
+          const px = parts[2] ?? "0";
+          const py = parts[3] ?? "0";
+          const sw = parts[4] ?? "0";
+          const sh = parts[5] ?? "0";
           return {
             index: parseInt(idx),
             name: name === "missing value" ? "" : name,
@@ -2971,7 +2987,7 @@ server.addTool({
       if (matches.length === 0) {
         throw new Error(`No element found matching "${search}"`);
       }
-      const target = matches[0];
+      const target = matches[0]!;
       axRef = pathToAxReference(target.path, windowIndex);
       elementDesc = target.description || target.help || target.title || target.path;
     }
@@ -3041,7 +3057,7 @@ server.addTool({
     } else {
       const matches = await findElementBySearch(appName, search!, windowIndex);
       if (matches.length === 0) throw new Error(`No element found matching "${search}"`);
-      target = matches[0];
+      target = matches[0]!;
     }
 
     const axRef = pathToAxReference(target.path, windowIndex);
@@ -3127,7 +3143,7 @@ server.addTool({
     } else {
       const matches = await findElementBySearch(appName, search!, windowIndex);
       if (matches.length === 0) throw new Error(`No element found matching "${search}"`);
-      const target = matches[0];
+      const target = matches[0]!;
       axRef = pathToAxReference(target.path, windowIndex);
       elementDesc = target.description || target.help || target.title || target.path;
     }
@@ -3262,7 +3278,11 @@ end tell`;
         .split("\n")
         .filter((l) => l.includes("|||"))
         .map((line) => {
-          const [idx, name, elemCount, summary] = line.split("|||");
+          const parts = line.split("|||");
+          const idx = parts[0] ?? "0";
+          const name = parts[1] ?? "";
+          const elemCount = parts[2] ?? "0";
+          const summary = parts[3] ?? "";
           const elementSummary: Record<string, number> = {};
           if (summary) {
             summary.split(", ").forEach((pair) => {
@@ -3354,10 +3374,10 @@ end tell`;
     try {
       const raw = runAppleScript(infoScript, 10000);
       const parts = raw.split("|||");
-      resolvedAppName = parts[1] || appName || "Unknown";
-      windowTitle = parts[2] === "missing value" ? "" : parts[2] || "";
-      pos = { x: parseInt(parts[3]) || 0, y: parseInt(parts[4]) || 0 };
-      sz = { w: parseInt(parts[5]) || 0, h: parseInt(parts[6]) || 0 };
+      resolvedAppName = parts[1] ?? appName ?? "Unknown";
+      windowTitle = (parts[2] ?? "") === "missing value" ? "" : parts[2] ?? "";
+      pos = { x: parseInt(parts[3] ?? "0") || 0, y: parseInt(parts[4] ?? "0") || 0 };
+      sz = { w: parseInt(parts[5] ?? "0") || 0, h: parseInt(parts[6] ?? "0") || 0 };
     } catch (e: any) {
       throw new Error(`Could not get window info: ${e.message}`);
     }
@@ -3397,13 +3417,13 @@ result.join('\\n');`,
         // Match by title if possible, otherwise take the Nth window
         if (windowTitle) {
           const match = windowLines.find((l) => l.includes(windowTitle));
-          if (match) windowId = parseInt(match.split("|||")[0]);
+          if (match) windowId = parseInt(match.split("|||")[0]!);
         }
         if (!windowId && windowLines.length >= windowIndex) {
-          windowId = parseInt(windowLines[windowIndex - 1].split("|||")[0]);
+          windowId = parseInt(windowLines[windowIndex - 1]!.split("|||")[0]!);
         }
         if (!windowId && windowLines.length > 0) {
-          windowId = parseInt(windowLines[0].split("|||")[0]);
+          windowId = parseInt(windowLines[0]!.split("|||")[0]!);
         }
       }
     } catch {
@@ -3445,8 +3465,8 @@ result.join('\\n');`,
       );
       const bounds = screenInfo.split(", ").map((s) => parseInt(s));
       if (bounds.length >= 4) {
-        screenW = bounds[2];
-        screenH = bounds[3];
+        screenW = bounds[2]!;
+        screenH = bounds[3]!;
       }
     } catch {
       // Non-critical
@@ -3522,7 +3542,9 @@ server.addTool({
     const screenBounds = runAppleScript(
       'tell application "Finder" to get bounds of window of desktop'
     );
-    const [, , screenW, screenH] = screenBounds.split(", ").map(Number);
+    const boundsParts = screenBounds.split(", ").map(Number);
+    const screenW = boundsParts[2] ?? 1920;
+    const screenH = boundsParts[3] ?? 1080;
 
     // Menu bar height offset
     const menuBarH = 25;
@@ -4235,10 +4257,10 @@ server.addTool({
         let currentIface = "";
         for (const line of lines) {
           const ifaceMatch = line.match(/^(\w+):/);
-          if (ifaceMatch) currentIface = ifaceMatch[1];
+          if (ifaceMatch) currentIface = ifaceMatch[1]!;
           const inetMatch = line.match(/inet\s+([\d.]+)/);
           if (inetMatch && currentIface) {
-            summary.push(`${currentIface}: ${inetMatch[1]}`);
+            summary.push(`${currentIface}: ${inetMatch[1]!}`);
           }
         }
         return `Network interfaces:\n${summary.join("\n") || "No interfaces found"}`;
