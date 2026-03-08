@@ -376,7 +376,7 @@ server.addTool({
 
       // Perform the OS-level screencapture
       if (mode === "full") {
-        child_process.execSync(`screencapture -x -D1 "${filePath}"`);
+        child_process.execFileSync("screencapture", ["-x", "-D1", filePath]);
       } else if (mode === "region") {
         if (
           regionX === undefined ||
@@ -388,9 +388,11 @@ server.addTool({
             "Region mode requires regionX, regionY, regionWidth, and regionHeight parameters"
           );
         }
-        child_process.execSync(
-          `screencapture -x -R${regionX},${regionY},${regionWidth},${regionHeight} "${filePath}"`
-        );
+        child_process.execFileSync("screencapture", [
+          "-x",
+          `-R${regionX},${regionY},${regionWidth},${regionHeight}`,
+          filePath,
+        ]);
       } else if (mode === "window") {
         let targetId = windowId;
         if (!targetId && windowName) {
@@ -409,15 +411,26 @@ server.addTool({
           throw new Error(
             "Could not determine target window ID for screenshot."
           );
-        child_process.execSync(`screencapture -x -l${targetId} "${filePath}"`);
+        child_process.execFileSync("screencapture", ["-x", `-l${targetId}`, filePath]);
       }
 
       if (!require("fs").existsSync(filePath)) {
         throw new Error(`Screenshot file was not created at ${filePath}`);
       }
 
-      return await imageContent({ path: filePath });
-    } catch (error: any) {}
+      try {
+        return await imageContent({ path: filePath });
+      } finally {
+        // Clean up temp file after reading
+        try {
+          require("fs").unlinkSync(filePath);
+        } catch (_) {
+          // Best-effort cleanup
+        }
+      }
+    } catch (error: any) {
+      throw new Error(`Screenshot failed: ${error?.message || error}`);
+    }
   },
 });
 
@@ -533,10 +546,10 @@ server.addTool({
       // Another fallback using AppleScript
       try {
         const output = child_process
-          .execSync(
-            `osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true'`
-          )
-          .toString()
+          .execFileSync("osascript", [
+            "-e",
+            'tell application "System Events" to get name of first application process whose frontmost is true',
+          ], { encoding: "utf-8", timeout: 5000 })
           .trim();
         return `Active window: "${output}"`;
       } catch (e2) {
@@ -570,8 +583,11 @@ server.addTool({
       // Limited functionality without nutjs
       if (action === "focus" && windowTitle) {
         try {
-          child_process.execSync(
-            `osascript -e 'tell application "${windowTitle}" to activate'`
+          const safeTitle = escapeForAppleScript(windowTitle);
+          child_process.execFileSync(
+            "osascript",
+            ["-e", `tell application "${safeTitle}" to activate`],
+            { encoding: "utf-8", timeout: 5000 }
           );
           return `Attempted to focus application: "${windowTitle}"`;
         } catch (e) {
@@ -1002,9 +1018,10 @@ server.addTool({
 
       const script = commandMap[command];
       if (script) {
-        child_process.execSync(
-          `osascript -e 'tell application "System Events" to ${script}'`
-        );
+        child_process.execFileSync("osascript", [
+          "-e",
+          `tell application "System Events" to ${script}`,
+        ], { encoding: "utf-8", timeout: 5000 });
         return `Executed ${command} command using AppleScript`;
       } else {
         throw new Error(`Unknown command: ${command}`);
@@ -1937,24 +1954,36 @@ server.addTool({
         }
       }
       case "fileChoose": {
-        let script = 'set theFile to (choose file with prompt "Select a file"';
-        if (message) script = `set theFile to (choose file with prompt "${escMsg}"`;
+        let chooseCmd = 'choose file with prompt "Select a file"';
+        if (message) chooseCmd = `choose file with prompt "${escMsg}"`;
         if (fileTypes && fileTypes.length > 0) {
           const types = fileTypes
             .map((t) => `"${escapeForAppleScript(t)}"`)
             .join(", ");
-          script += ` of type {${types}}`;
+          chooseCmd += ` of type {${types}}`;
         }
-        if (multipleSelection)
-          script += " with multiple selections allowed";
-        script += ")\nPOSIX path of theFile";
-        try {
-          const posix = runAppleScript(script, 120000);
-          return `Selected file: ${posix}`;
-        } catch (e: any) {
-          if (e.message.includes("User canceled"))
-            return "User canceled file selection.";
-          throw new Error(`File choose failed: ${e.message}`);
+        if (multipleSelection) {
+          chooseCmd += " with multiple selections allowed";
+          // Multiple selection returns a list — iterate to get POSIX paths
+          const script = `set theFiles to (${chooseCmd})\nset output to ""\nrepeat with aFile in theFiles\nset output to output & POSIX path of aFile & linefeed\nend repeat\nreturn output`;
+          try {
+            const posix = runAppleScript(script, 120000);
+            return `Selected files:\n${posix.trim()}`;
+          } catch (e: any) {
+            if (e.message.includes("User canceled"))
+              return "User canceled file selection.";
+            throw new Error(`File choose failed: ${e.message}`);
+          }
+        } else {
+          const script = `set theFile to (${chooseCmd})\nPOSIX path of theFile`;
+          try {
+            const posix = runAppleScript(script, 120000);
+            return `Selected file: ${posix}`;
+          } catch (e: any) {
+            if (e.message.includes("User canceled"))
+              return "User canceled file selection.";
+            throw new Error(`File choose failed: ${e.message}`);
+          }
         }
       }
     }
@@ -2008,11 +2037,11 @@ server.addTool({
       }
       case "getSelection": {
         const result = runAppleScript(
-          'tell application "Finder" to get POSIX path of (selection as alias list)'
+          'tell application "Finder"\nset sel to selection as alias list\nset output to ""\nrepeat with f in sel\nset output to output & POSIX path of f & linefeed\nend repeat\nreturn output\nend tell'
         );
-        if (!result || result === "")
+        if (!result || result.trim() === "")
           return "No files selected in Finder.";
-        return `Finder selection:\n${result}`;
+        return `Finder selection:\n${result.trim()}`;
       }
       case "openWith": {
         if (!filePath) throw new Error("filePath is required for openWith");
@@ -2134,11 +2163,18 @@ server.addTool({
       info.push(`Dark mode: ${dark === "true" ? "on" : "off"}`);
     } catch {}
 
-    // WiFi
+    // WiFi — discover interface dynamically (en0 on MacBooks, en1 on desktops)
     try {
+      const hwPorts = execFileSync(
+        "networksetup",
+        ["-listallhardwareports"],
+        { encoding: "utf-8", timeout: 5000 }
+      );
+      const wifiMatch = hwPorts.match(/Hardware Port: Wi-Fi\nDevice: (\w+)/);
+      const wifiDev = wifiMatch ? wifiMatch[1] : "en0";
       const wifi = execFileSync(
         "networksetup",
-        ["-getairportnetwork", "en0"],
+        ["-getairportnetwork", wifiDev],
         { encoding: "utf-8", timeout: 5000 }
       ).trim();
       info.push(`WiFi: ${wifi.replace("Current Wi-Fi Network: ", "")}`);
@@ -2580,22 +2616,35 @@ server.addTool({
     }
 
     if (action === "list") {
-      try {
-        const flags = protocol === "udp"
-          ? ["-iUDP", "-P", "-n"] // UDP has no LISTEN state
-          : protocol === "both"
-          ? ["-i", "-P", "-n", "-sTCP:LISTEN"]
-          : ["-iTCP", "-P", "-n", "-sTCP:LISTEN"];
-        const output = execFileSync("lsof", flags, {
-          encoding: "utf-8",
-          timeout: 10000,
-        });
-        const lines = output.trim().split("\n");
-        return `Listening ports (${lines.length - 1} services):\n${lines.join("\n")}`;
-      } catch (e: any) {
-        if (e.status === 1) return "No listening ports found.";
-        throw new Error(`Port list failed: ${e.message}`);
+      const results: string[] = [];
+      // TCP listening ports
+      if (protocol === "tcp" || protocol === "both") {
+        try {
+          const output = execFileSync("lsof", ["-iTCP", "-P", "-n", "-sTCP:LISTEN"], {
+            encoding: "utf-8",
+            timeout: 10000,
+          });
+          results.push(output.trim());
+        } catch (e: any) {
+          if (e.status !== 1) throw new Error(`TCP port list failed: ${e.message}`);
+        }
       }
+      // UDP ports (no LISTEN state for UDP)
+      if (protocol === "udp" || protocol === "both") {
+        try {
+          const output = execFileSync("lsof", ["-iUDP", "-P", "-n"], {
+            encoding: "utf-8",
+            timeout: 10000,
+          });
+          results.push(output.trim());
+        } catch (e: any) {
+          if (e.status !== 1) throw new Error(`UDP port list failed: ${e.message}`);
+        }
+      }
+      if (results.length === 0) return "No listening ports found.";
+      const merged = results.join("\n");
+      const lines = merged.split("\n");
+      return `Listening ports (${lines.length - 1} entries):\n${merged}`;
     }
 
     throw new Error("Invalid action");
@@ -2882,16 +2931,27 @@ server.addTool({
     const fs = require("fs");
     const pidFile = `/tmp/mcp-record-${process.env.USER || "default"}.pid`;
 
+    // Helper: verify PID is actually screencapture (not a reused PID)
+    const isScreencapturePid = (pid: string): boolean => {
+      try {
+        process.kill(parseInt(pid), 0); // Check if alive
+        const psOut = execFileSync("ps", ["-p", pid, "-o", "comm="], {
+          encoding: "utf-8",
+          timeout: 3000,
+        }).trim();
+        return psOut.includes("screencapture");
+      } catch {
+        return false;
+      }
+    };
+
     if (action === "status") {
       if (fs.existsSync(pidFile)) {
         const pid = fs.readFileSync(pidFile, "utf-8").trim();
-        try {
-          process.kill(parseInt(pid), 0); // Check if alive
+        if (isScreencapturePid(pid)) {
           return `Screen recording is active (PID: ${pid}).`;
-        } catch {
-          fs.unlinkSync(pidFile);
-          return "No active screen recording.";
         }
+        fs.unlinkSync(pidFile);
       }
       return "No active screen recording.";
     }
@@ -2915,15 +2975,14 @@ server.addTool({
     }
 
     if (action === "start") {
-      // Check for existing recording
+      // Check for existing recording — verify it's actually screencapture
       if (fs.existsSync(pidFile)) {
         const existingPid = fs.readFileSync(pidFile, "utf-8").trim();
-        try {
-          process.kill(parseInt(existingPid), 0);
+        if (isScreencapturePid(existingPid)) {
           return `A recording is already active (PID: ${existingPid}). Stop it first.`;
-        } catch {
-          fs.unlinkSync(pidFile);
         }
+        // Stale PID file — clean up
+        fs.unlinkSync(pidFile);
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
