@@ -101,6 +101,32 @@ Or manually enable in: **System Settings** → **Privacy & Security** → **Acce
 - `imageMatch` - Find a template image on screen using visual template matching
 - `multiMonitor` - Get information about all connected displays (name, resolution, and display flags)
 
+### 🍎 macOS Native Controls (osascript)
+
+- `volumeControl` - Get/set system volume (0-100), mute/unmute/toggle
+- `brightnessControl` - Get/set display brightness (0-100) via `brightness` CLI
+- `appControl` - Launch, quit, force-quit, hide, unhide apps; check if running; list all running apps
+- `menuClick` - Click application menu bar items by path (e.g., File > Save As...)
+- `clipboard` - Read, write, or clear the system clipboard via `pbcopy`/`pbpaste`
+- `dialog` - Display alerts, text prompts, list selectors, or file/folder choosers
+- `finderControl` - Reveal files, get Finder selection, open with app, trash, empty trash, new window
+- `systemInfoExtended` - macOS version, computer name, battery, dark mode, WiFi, screen saver status
+- `darkMode` - Get, enable, disable, or toggle macOS dark/light mode
+- `sayText` - Text-to-speech using macOS `say` command with voice and rate options
+
+### 🛠️ Developer Workflow Tools
+
+- `accessibilityInspector` - Inspect UI element accessibility tree at coordinates or for focused element
+- `windowTiling` - Tile, cascade, or grid-arrange windows; move to corners/halves/quadrants
+- `portCheck` - Check if a port is in use, find process using it, or list all listening ports
+- `fileWatcher` - Watch a file or directory for changes (create, modify, delete) with timeout
+- `quickLook` - Preview files using macOS Quick Look (non-blocking)
+- `spotlightSearch` - Search files and content using macOS Spotlight (`mdfind`)
+- `pasteboardInfo` - Get detailed clipboard/pasteboard info (types, sizes, history)
+- `screenRecording` - Start/stop screen recording via `screencapture`, check status
+- `defaultsControl` - Read/write/delete macOS user defaults (preferences) for any app domain
+- `networkDiagnostics` - Ping hosts, DNS lookup, check connectivity, trace routes, scan ports
+
 ## 🔒 Security & Permissions
 
 1. **Accessibility** - Required for:
