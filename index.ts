@@ -661,6 +661,164 @@ server.addTool({
   },
 });
 
+// Tool 17b: Image Match (Template Matching)
+server.addTool({
+  name: "imageMatch",
+  description:
+    "Finds a template image on the screen. Captures a screenshot and searches for the template within it. Returns the center coordinates and confidence of the best match. Optionally restrict search to a specific screen region.",
+  parameters: z.object({
+    templatePath: z
+      .string()
+      .describe("Path to the template image file to search for"),
+    region: z
+      .object({
+        x: z.number().min(0).describe("X coordinate"),
+        y: z.number().min(0).describe("Y coordinate"),
+        width: z.number().min(1).describe("Width"),
+        height: z.number().min(1).describe("Height"),
+      })
+      .optional()
+      .describe("Optional screen region to search within"),
+    threshold: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0.8)
+      .describe("Minimum match confidence (0.0-1.0)"),
+  }),
+  execute: async ({ templatePath, region, threshold }) => {
+    const { execFileSync } = child_process;
+    const fs = require("fs");
+    const { Jimp } = require("jimp");
+
+    // Manual intToRGBA - compatible with all Jimp versions (v1.x moved the export)
+    const intToRGBA = (i: number) => ({
+      r: (i >> 24) & 0xff,
+      g: (i >> 16) & 0xff,
+      b: (i >> 8) & 0xff,
+      a: i & 0xff,
+    });
+
+    if (!fs.existsSync(templatePath)) {
+      throw new Error(`Template file not found: ${templatePath}`);
+    }
+
+    // Capture screen region
+    const tmpScreen = path.join(
+      os.tmpdir(),
+      `imgmatch_screen_${Date.now()}.png`
+    );
+    try {
+      const captureArgs = ["-x"];
+      if (region) {
+        captureArgs.push(
+          "-R",
+          `${region.x},${region.y},${region.width},${region.height}`
+        );
+      }
+      captureArgs.push(tmpScreen);
+      execFileSync("screencapture", captureArgs, { timeout: 10000 });
+    } catch (error: any) {
+      throw new Error(`Failed to capture screen: ${error.message}`);
+    }
+
+    try {
+      const screenImg = await Jimp.read(tmpScreen);
+      const templateImg = await Jimp.read(templatePath);
+
+      const sw = screenImg.bitmap.width;
+      const sh = screenImg.bitmap.height;
+      const tw = templateImg.bitmap.width;
+      const th = templateImg.bitmap.height;
+
+      if (tw > sw || th > sh) {
+        throw new Error(
+          `Template (${tw}x${th}) is larger than search area (${sw}x${sh}).`
+        );
+      }
+
+      // Sliding window template matching (coarse-to-fine)
+      let bestScore = -1;
+      let bestX = 0;
+      let bestY = 0;
+      const stepX = Math.max(1, Math.floor(tw / 8));
+      const stepY = Math.max(1, Math.floor(th / 8));
+
+      const compareAt = (sx: number, sy: number, sampleStep: number): number => {
+        let matchCount = 0;
+        let totalSamples = 0;
+        for (let ty = 0; ty < th; ty += sampleStep) {
+          for (let tx = 0; tx < tw; tx += sampleStep) {
+            const sc = screenImg.getPixelColor(sx + tx, sy + ty);
+            const tc = templateImg.getPixelColor(tx, ty);
+            totalSamples++;
+            const sr = intToRGBA(sc);
+            const tr = intToRGBA(tc);
+            const diff =
+              Math.abs(sr.r - tr.r) +
+              Math.abs(sr.g - tr.g) +
+              Math.abs(sr.b - tr.b);
+            if (diff < 30) matchCount++;
+          }
+        }
+        return totalSamples > 0 ? matchCount / totalSamples : 0;
+      };
+
+      // Coarse pass
+      const coarseSampleStep = Math.max(1, Math.floor(Math.min(tw, th) / 10));
+      for (let sy = 0; sy <= sh - th; sy += stepY) {
+        for (let sx = 0; sx <= sw - tw; sx += stepX) {
+          const score = compareAt(sx, sy, coarseSampleStep);
+          if (score > bestScore) {
+            bestScore = score;
+            bestX = sx;
+            bestY = sy;
+          }
+        }
+      }
+
+      // Fine pass around best coarse location (wider range, lower threshold)
+      if (bestScore > 0.15) {
+        const fineRange = Math.max(stepX, stepY) * 3;
+        const fineStartX = Math.max(0, bestX - fineRange);
+        const fineStartY = Math.max(0, bestY - fineRange);
+        const fineEndX = Math.min(sw - tw, bestX + fineRange);
+        const fineEndY = Math.min(sh - th, bestY + fineRange);
+        const fineSampleStep = Math.max(
+          1,
+          Math.floor(Math.min(tw, th) / 16)
+        );
+
+        for (let sy = fineStartY; sy <= fineEndY; sy++) {
+          for (let sx = fineStartX; sx <= fineEndX; sx++) {
+            const score = compareAt(sx, sy, fineSampleStep);
+            if (score > bestScore) {
+              bestScore = score;
+              bestX = sx;
+              bestY = sy;
+            }
+          }
+        }
+      }
+
+      const offsetX = region ? region.x : 0;
+      const offsetY = region ? region.y : 0;
+
+      if (bestScore >= threshold) {
+        const cx = offsetX + bestX + Math.floor(tw / 2);
+        const cy = offsetY + bestY + Math.floor(th / 2);
+        return `Match found at (${cx}, ${cy}) with confidence ${bestScore.toFixed(3)}. Template size: ${tw}x${th}.`;
+      }
+
+      return `No match found (best confidence: ${bestScore.toFixed(3)}, threshold: ${threshold}). Template: ${tw}x${th}.`;
+    } finally {
+      try {
+        require("fs").unlinkSync(tmpScreen);
+      } catch {}
+    }
+  },
+});
+
 // Tool 18: Sleep/Delay
 server.addTool({
   name: "sleep",
@@ -843,6 +1001,484 @@ server.addTool({
         return `Executed ${command} command using AppleScript`;
       } else {
         throw new Error(`Unknown command: ${command}`);
+      }
+    }
+  },
+});
+
+// ============== ENHANCED AUTOMATION TOOLS ==============
+
+// Tool 21: Process Manager
+server.addTool({
+  name: "processManager",
+  description:
+    "Lists running processes or terminates a process by name or PID. Use action='list' to see processes (optionally filter by name), action='kill' to terminate.",
+  parameters: z.object({
+    action: z.enum(["list", "kill"]).describe("Action to perform"),
+    name: z
+      .string()
+      .optional()
+      .describe("Process name to filter/kill"),
+    pid: z.number().optional().describe("Process ID to kill"),
+    signal: z
+      .enum(["TERM", "KILL"])
+      .default("TERM")
+      .describe("Signal to send: TERM (graceful) or KILL (force)"),
+  }),
+  execute: async ({ action, name, pid, signal }) => {
+    const { execFileSync } = child_process;
+
+    if (action === "list") {
+      try {
+        const output = execFileSync("ps", ["aux"], {
+          encoding: "utf-8",
+          timeout: 10000,
+        });
+        const lines = output.trim().split("\n");
+        if (name) {
+          const filtered = lines.filter(
+            (line: string, i: number) =>
+              i === 0 || line.toLowerCase().includes(name.toLowerCase())
+          );
+          return filtered.length > 1
+            ? `Processes matching "${name}":\n${filtered.join("\n")}`
+            : `No processes found matching "${name}".`;
+        }
+        // Return top 30 processes by default
+        return `Running processes (top 30):\n${lines.slice(0, 31).join("\n")}`;
+      } catch (error: any) {
+        throw new Error(`Failed to list processes: ${error.message}`);
+      }
+    }
+
+    if (action === "kill") {
+      if (!pid && !name) {
+        throw new Error(
+          "Either pid or name must be provided for kill action."
+        );
+      }
+
+      try {
+        const sigFlag = signal === "KILL" ? "-9" : "-15";
+        if (pid) {
+          execFileSync("kill", [sigFlag, String(pid)], {
+            encoding: "utf-8",
+            timeout: 5000,
+          });
+          return `Sent ${signal} signal to process ${pid}.`;
+        }
+        // Kill by name using pkill with -x for exact match (prevents regex injection)
+        const safeName = name!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        execFileSync("pkill", [sigFlag, "-x", safeName], {
+          encoding: "utf-8",
+          timeout: 5000,
+        });
+        return `Sent ${signal} signal to processes matching "${name}".`;
+      } catch (error: any) {
+        if (error.status === 1) {
+          return `No processes found matching the criteria.`;
+        }
+        throw new Error(`Failed to kill process: ${error.message}`);
+      }
+    }
+
+    throw new Error('Invalid action. Use "list" or "kill".');
+  },
+});
+
+// Tool 22: macOS Notification
+server.addTool({
+  name: "notification",
+  description:
+    "Sends a macOS notification to the Notification Center with a title and message. Optionally includes a subtitle and sound.",
+  parameters: z.object({
+    title: z.string().describe("Notification title"),
+    message: z.string().describe("Notification message body"),
+    subtitle: z.string().optional().describe("Optional subtitle"),
+    sound: z
+      .string()
+      .default("default")
+      .describe(
+        "Sound name (e.g., 'default', 'Basso', 'Blow', 'Bottle', 'Frog', 'Funk', 'Glass', 'Hero', 'Morse', 'Ping', 'Pop', 'Purr', 'Sosumi', 'Submarine', 'Tink')"
+      ),
+  }),
+  execute: async ({ title, message, subtitle, sound }) => {
+    const { execFileSync } = child_process;
+
+    // Build AppleScript - escape backslashes, quotes, and control characters
+    const escapeAppleScript = (s: string) =>
+      s
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, "\\n")
+        .replace(/\r/g, "\\r")
+        .replace(/\t/g, "\\t");
+    const escTitle = escapeAppleScript(title);
+    const escMsg = escapeAppleScript(message);
+
+    let script = `display notification "${escMsg}" with title "${escTitle}"`;
+    if (subtitle) {
+      const escSub = escapeAppleScript(subtitle);
+      script += ` subtitle "${escSub}"`;
+    }
+    if (sound && sound !== "none") {
+      const escSound = escapeAppleScript(sound);
+      script += ` sound name "${escSound}"`;
+    }
+
+    try {
+      execFileSync("osascript", ["-e", script], {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      return `Notification sent: "${title}" - ${message}`;
+    } catch (error: any) {
+      throw new Error(`Failed to send notification: ${error.message}`);
+    }
+  },
+});
+
+// Tool 23: OCR (Optical Character Recognition)
+server.addTool({
+  name: "ocr",
+  description:
+    "Reads text from a screen region or image file using macOS Vision framework OCR. Specify a region {x, y, width, height} to capture and read from screen, or provide an imagePath to read from a file.",
+  parameters: z.object({
+    region: z
+      .object({
+        x: z.number().min(0).describe("X coordinate"),
+        y: z.number().min(0).describe("Y coordinate"),
+        width: z.number().min(1).describe("Width of region"),
+        height: z.number().min(1).describe("Height of region"),
+      })
+      .optional()
+      .describe("Screen region to capture and OCR"),
+    imagePath: z
+      .string()
+      .optional()
+      .describe("Path to an image file to OCR"),
+  }),
+  execute: async ({ region, imagePath }) => {
+    const { execFileSync } = child_process;
+    const fs = require("fs");
+
+    let targetPath = imagePath;
+    let tempFile: string | null = null;
+
+    // If region specified, capture screenshot of that region
+    if (region && !imagePath) {
+      tempFile = path.join(os.tmpdir(), `ocr_capture_${Date.now()}.png`);
+      try {
+        execFileSync(
+          "screencapture",
+          [
+            "-x",
+            "-R",
+            `${region.x},${region.y},${region.width},${region.height}`,
+            tempFile,
+          ],
+          { timeout: 10000 }
+        );
+        targetPath = tempFile;
+      } catch (error: any) {
+        throw new Error(
+          `Failed to capture screen region: ${error.message}`
+        );
+      }
+    }
+
+    if (!targetPath) {
+      throw new Error("Either region or imagePath must be provided.");
+    }
+
+    if (!fs.existsSync(targetPath)) {
+      throw new Error(`Image file not found: ${targetPath}`);
+    }
+
+    // Use macOS Vision framework via Swift subprocess
+    // Pass path as CLI argument to avoid string interpolation injection
+    const swiftScript = `
+import Vision
+import AppKit
+
+let filePath = CommandLine.arguments[1]
+let url = URL(fileURLWithPath: filePath)
+guard let image = NSImage(contentsOf: url),
+      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+    print("ERROR: Could not load image")
+    exit(1)
+}
+
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = true
+
+let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+try handler.perform([request])
+
+guard let observations = request.results else {
+    print("")
+    exit(0)
+}
+
+for observation in observations {
+    if let candidate = observation.topCandidates(1).first {
+        print(candidate.string)
+    }
+}
+`;
+
+    try {
+      const result = execFileSync("swift", ["-e", swiftScript, targetPath], {
+        encoding: "utf-8",
+        timeout: 30000,
+      });
+
+      // Clean up temp file
+      if (tempFile) {
+        try {
+          fs.unlinkSync(tempFile);
+        } catch {}
+      }
+
+      const text = result.trim();
+      if (text && !text.startsWith("ERROR:")) {
+        return `OCR text:\n${text}`;
+      }
+      if (text.startsWith("ERROR:")) {
+        throw new Error(text);
+      }
+      return "No text detected in the specified region.";
+    } catch (error: any) {
+      // Clean up temp file on error
+      if (tempFile) {
+        try {
+          require("fs").unlinkSync(tempFile);
+        } catch {}
+      }
+      throw new Error(`OCR failed: ${error.message}`);
+    }
+  },
+});
+
+// Tool 24: Wait for Screen Change
+server.addTool({
+  name: "waitForChange",
+  description:
+    "Waits until a screen region visually changes beyond a threshold. Captures a baseline screenshot and polls for changes. Returns when change is detected or timeout is reached. Useful for waiting for loading to complete or UI updates.",
+  parameters: z.object({
+    region: z
+      .object({
+        x: z.number().min(0).describe("X coordinate"),
+        y: z.number().min(0).describe("Y coordinate"),
+        width: z.number().min(1).describe("Width of region"),
+        height: z.number().min(1).describe("Height of region"),
+      })
+      .describe("Screen region to monitor"),
+    timeout: z
+      .number()
+      .default(30000)
+      .describe("Timeout in milliseconds"),
+    threshold: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0.05)
+      .describe(
+        "Minimum change ratio (0.0-1.0) to trigger detection"
+      ),
+    pollInterval: z
+      .number()
+      .min(100)
+      .default(500)
+      .describe("Polling interval in milliseconds (minimum 100)"),
+  }),
+  execute: async ({ region, timeout, threshold, pollInterval }) => {
+    // Validate region dimensions
+    if (region.width <= 0 || region.height <= 0) {
+      throw new Error("Region width and height must be positive");
+    }
+    // Cap timeout to prevent indefinite blocking
+    timeout = Math.min(timeout, 60000);
+    const { execFileSync } = child_process;
+    const fs = require("fs");
+
+    const captureRegion = (): Buffer => {
+      const tmpFile = path.join(
+        os.tmpdir(),
+        `wfc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`
+      );
+      try {
+        execFileSync(
+          "screencapture",
+          [
+            "-x",
+            "-R",
+            `${region.x},${region.y},${region.width},${region.height}`,
+            tmpFile,
+          ],
+          { timeout: 5000 }
+        );
+        return fs.readFileSync(tmpFile);
+      } finally {
+        try {
+          fs.unlinkSync(tmpFile);
+        } catch {}
+      }
+    };
+
+    // Convert PNG to raw BMP for reliable pixel-level comparison
+    const getPixelData = (pngBuffer: Buffer): Buffer => {
+      const tmpPng = path.join(
+        os.tmpdir(),
+        `wfc_raw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`
+      );
+      const tmpBmp = tmpPng.replace(".png", ".bmp");
+      try {
+        fs.writeFileSync(tmpPng, pngBuffer);
+        execFileSync(
+          "sips",
+          ["-s", "format", "bmp", tmpPng, "--out", tmpBmp],
+          { timeout: 5000, stdio: "pipe" }
+        );
+        return fs.readFileSync(tmpBmp);
+      } finally {
+        try {
+          fs.unlinkSync(tmpPng);
+        } catch {}
+        try {
+          fs.unlinkSync(tmpBmp);
+        } catch {}
+      }
+    };
+
+    // Capture baseline
+    let baseline: Buffer;
+    try {
+      const pngData = captureRegion();
+      baseline = getPixelData(pngData);
+    } catch (error: any) {
+      throw new Error(`Failed to capture baseline: ${error.message}`);
+    }
+
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout) {
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+
+      try {
+        const pngData = captureRegion();
+        const current = getPixelData(pngData);
+
+        // Compare pixel data - read BMP header fields for correct pixel access
+        const minLen = Math.min(baseline.length, current.length);
+        const headerSize =
+          baseline.length >= 14 ? baseline.readUInt32LE(10) : 54;
+        // Read bits-per-pixel from BMP DIB header (bytes 28-29, LE uint16)
+        const bpp =
+          baseline.length >= 30 ? baseline.readUInt16LE(28) : 32;
+        const bytesPerPixel = bpp / 8; // 3 for 24-bit, 4 for 32-bit
+        const pixelLen = minLen - headerSize;
+        if (pixelLen <= 0 || bytesPerPixel < 3) continue;
+
+        let diffCount = 0;
+        const totalSamples = Math.floor(pixelLen / bytesPerPixel);
+        for (let i = headerSize; i < minLen - (bytesPerPixel - 1); i += bytesPerPixel) {
+          if (
+            baseline[i] !== current[i] ||
+            baseline[i + 1] !== current[i + 1] ||
+            baseline[i + 2] !== current[i + 2]
+          ) {
+            diffCount++;
+          }
+        }
+        const diffRatio =
+          totalSamples > 0 ? diffCount / totalSamples : 0;
+
+        if (diffRatio >= threshold) {
+          const elapsed = (
+            (Date.now() - startTime) /
+            1000
+          ).toFixed(1);
+          const pct = (diffRatio * 100).toFixed(1);
+          return `Change detected in region (${region.x}, ${region.y}, ${region.width}x${region.height}) after ${elapsed}s. ${pct}% of pixels changed.`;
+        }
+      } catch {
+        // Ignore individual capture failures, keep polling
+        continue;
+      }
+    }
+
+    return `Timeout: no significant change detected in region (${region.x}, ${region.y}, ${region.width}x${region.height}) after ${timeout / 1000}s (threshold: ${(threshold * 100).toFixed(0)}%).`;
+  },
+});
+
+// Tool 25: Multi-Monitor Information
+server.addTool({
+  name: "multiMonitor",
+  description:
+    "Returns information about all connected displays including resolution, Retina scaling, and position. Useful for multi-monitor setups.",
+  parameters: z.object({}),
+  execute: async () => {
+    const { execFileSync } = child_process;
+
+    try {
+      const output = execFileSync(
+        "system_profiler",
+        ["SPDisplaysDataType", "-json"],
+        { encoding: "utf-8", timeout: 10000 }
+      );
+
+      const data = JSON.parse(output);
+      const displays: string[] = [];
+      let idx = 1;
+
+      for (const gpu of data.SPDisplaysDataType || []) {
+        for (const display of gpu.spdisplays_ndrvs || []) {
+          const name = display._name || "Unknown";
+          const resolution =
+            display._spdisplays_resolution || "Unknown";
+          const retina = display.spdisplays_retina
+            ? " (Retina)"
+            : "";
+          const main =
+            display.spdisplays_main === "spdisplays_yes"
+              ? " (primary)"
+              : "";
+          const mirror =
+            display.spdisplays_mirror === "spdisplays_on"
+              ? " [mirrored]"
+              : "";
+          displays.push(
+            `[${idx}] ${name}: ${resolution}${retina}${main}${mirror}`
+          );
+          idx++;
+        }
+      }
+
+      if (displays.length === 0) {
+        // Fallback to nutjs
+        try {
+          requireNutjs();
+          const w = await screen.width();
+          const h = await screen.height();
+          return `Monitors (1):\n[1] ${w}x${h} (primary)`;
+        } catch {
+          return "No display information available.";
+        }
+      }
+
+      return `Monitors (${displays.length}):\n${displays.join("\n")}`;
+    } catch (error: any) {
+      // Fallback
+      try {
+        requireNutjs();
+        const w = await screen.width();
+        const h = await screen.height();
+        return `Monitors (1):\n[1] ${w}x${h} (primary)`;
+      } catch {
+        throw new Error(
+          `Failed to get monitor info: ${error.message}`
+        );
       }
     }
   },
