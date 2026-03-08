@@ -1509,6 +1509,744 @@ server.addTool({
   },
 });
 
+// ============== OSASCRIPT macOS TOOLS ==============
+
+// Helper: escape string for safe AppleScript interpolation
+const escapeForAppleScript = (s: string): string =>
+  s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+
+// Helper: execute AppleScript safely and return trimmed output
+const runAppleScript = (script: string, timeoutMs: number = 10000): string => {
+  const { execFileSync } = child_process;
+  return execFileSync("osascript", ["-e", script], {
+    encoding: "utf-8",
+    timeout: timeoutMs,
+  }).trim();
+};
+
+// Tool 26: Volume Control
+server.addTool({
+  name: "volumeControl",
+  description:
+    "Control macOS system volume. Get current level, set to specific value (0-100), mute, unmute, or toggle mute.",
+  parameters: z.object({
+    action: z
+      .enum(["get", "set", "mute", "unmute", "toggle"])
+      .describe("Action to perform"),
+    level: z
+      .number()
+      .min(0)
+      .max(100)
+      .optional()
+      .describe("Volume level 0-100 (required for 'set' action)"),
+  }),
+  execute: async ({ action, level }) => {
+    switch (action) {
+      case "get": {
+        const vol = runAppleScript("output volume of (get volume settings)");
+        const muted = runAppleScript(
+          "output muted of (get volume settings)"
+        );
+        return `Volume: ${vol}%, Muted: ${muted}`;
+      }
+      case "set": {
+        if (level === undefined)
+          throw new Error("Level is required for 'set' action");
+        runAppleScript(`set volume output volume ${level}`);
+        return `Volume set to ${level}%`;
+      }
+      case "mute": {
+        runAppleScript("set volume with output muted");
+        return "Volume muted.";
+      }
+      case "unmute": {
+        runAppleScript("set volume without output muted");
+        return "Volume unmuted.";
+      }
+      case "toggle": {
+        const isMuted = runAppleScript(
+          "output muted of (get volume settings)"
+        );
+        if (isMuted === "true") {
+          runAppleScript("set volume without output muted");
+          return "Volume unmuted.";
+        } else {
+          runAppleScript("set volume with output muted");
+          return "Volume muted.";
+        }
+      }
+    }
+  },
+});
+
+// Tool 27: Brightness Control
+server.addTool({
+  name: "brightnessControl",
+  description:
+    "Control macOS display brightness. Get current level or set to a specific value (0.0-1.0 scale).",
+  parameters: z.object({
+    action: z.enum(["get", "set"]).describe("Action to perform"),
+    level: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe(
+        "Brightness level 0.0-1.0 (required for 'set' action). 0=darkest, 1=brightest."
+      ),
+  }),
+  execute: async ({ action, level }) => {
+    const { execFileSync } = child_process;
+    if (action === "get") {
+      try {
+        // Try using brightness CLI (brew install brightness)
+        const output = execFileSync("brightness", ["-l"], {
+          encoding: "utf-8",
+          timeout: 5000,
+        });
+        const match = output.match(/brightness\s+([\d.]+)/);
+        if (match) {
+          const pct = Math.round(parseFloat(match[1]) * 100);
+          return `Display brightness: ${pct}% (${match[1]})`;
+        }
+        return `Brightness output: ${output.trim()}`;
+      } catch {
+        // Fallback: read from IOKit via system_profiler
+        try {
+          const info = execFileSync(
+            "system_profiler",
+            ["SPDisplaysDataType"],
+            { encoding: "utf-8", timeout: 10000 }
+          );
+          return `Display info:\n${info.trim().substring(0, 500)}`;
+        } catch (e: any) {
+          throw new Error(
+            `Cannot get brightness. Install 'brightness' via Homebrew: brew install brightness. Error: ${e.message}`
+          );
+        }
+      }
+    } else {
+      if (level === undefined)
+        throw new Error("Level is required for 'set' action");
+      try {
+        execFileSync("brightness", [String(level)], {
+          encoding: "utf-8",
+          timeout: 5000,
+        });
+        return `Brightness set to ${Math.round(level * 100)}% (${level})`;
+      } catch (e: any) {
+        throw new Error(
+          `Cannot set brightness. Install 'brightness' via Homebrew: brew install brightness. Error: ${e.message}`
+        );
+      }
+    }
+  },
+});
+
+// Tool 28: App Control
+server.addTool({
+  name: "appControl",
+  description:
+    "Control macOS applications: launch, quit, force-quit, hide, unhide, check if running, or list all running apps.",
+  parameters: z.object({
+    action: z
+      .enum(["launch", "quit", "forceQuit", "hide", "unhide", "isRunning", "list"])
+      .describe("Action to perform"),
+    appName: z
+      .string()
+      .optional()
+      .describe(
+        "Application name (e.g., 'Safari', 'Finder'). Required for all actions except 'list'."
+      ),
+  }),
+  execute: async ({ action, appName }) => {
+    if (action !== "list" && !appName) {
+      throw new Error(`appName is required for '${action}' action.`);
+    }
+    const esc = appName ? escapeForAppleScript(appName) : "";
+
+    switch (action) {
+      case "launch":
+        runAppleScript(`tell application "${esc}" to activate`);
+        return `Launched "${appName}".`;
+      case "quit":
+        runAppleScript(`tell application "${esc}" to quit`);
+        return `Quit "${appName}".`;
+      case "forceQuit":
+        runAppleScript(
+          `tell application "${esc}" to quit saving no`
+        );
+        return `Force-quit "${appName}" (without saving).`;
+      case "hide":
+        runAppleScript(
+          `tell application "System Events" to set visible of process "${esc}" to false`
+        );
+        return `Hidden "${appName}".`;
+      case "unhide":
+        runAppleScript(
+          `tell application "System Events" to set visible of process "${esc}" to true`
+        );
+        runAppleScript(`tell application "${esc}" to activate`);
+        return `Unhidden and activated "${appName}".`;
+      case "isRunning": {
+        const result = runAppleScript(
+          `tell application "System Events" to (name of processes) contains "${esc}"`
+        );
+        return `"${appName}" is ${result === "true" ? "running" : "not running"}.`;
+      }
+      case "list": {
+        const result = runAppleScript(
+          'tell application "System Events" to get name of every process whose background only is false'
+        );
+        return `Running apps:\n${result}`;
+      }
+      default:
+        throw new Error(`Unknown action: ${action}`);
+    }
+  },
+});
+
+// Tool 29: Menu Click
+server.addTool({
+  name: "menuClick",
+  description:
+    'Click a menu item in an application\'s menu bar. Provide the app process name and menu path as an array (e.g., ["File", "Save As..."]).',
+  parameters: z.object({
+    appName: z
+      .string()
+      .describe(
+        "Application process name (e.g., 'Safari', 'Finder', 'Code')"
+      ),
+    menuPath: z
+      .array(z.string())
+      .min(1)
+      .max(5)
+      .describe(
+        'Menu path from menu bar to item, e.g., ["File", "Save As..."] or ["View", "Developer", "Developer Tools"]'
+      ),
+  }),
+  execute: async ({ appName, menuPath }) => {
+    const escApp = escapeForAppleScript(appName);
+
+    // First activate the app so its menu bar is showing
+    runAppleScript(`tell application "${escApp}" to activate`);
+
+    // Build nested menu click AppleScript
+    // menuPath[0] = top-level menu, menuPath[1..n-1] = submenus, menuPath[n] = item
+    if (menuPath.length === 1) {
+      // Just clicking a top-level menu (unusual but supported)
+      const escMenu = escapeForAppleScript(menuPath[0]);
+      runAppleScript(
+        `tell application "System Events" to tell process "${escApp}" to click menu bar item "${escMenu}" of menu bar 1`
+      );
+      return `Clicked menu bar item "${menuPath[0]}" in ${appName}.`;
+    }
+
+    // Build from innermost to outermost
+    const topMenu = escapeForAppleScript(menuPath[0]);
+    const targetItem = escapeForAppleScript(menuPath[menuPath.length - 1]);
+
+    let script: string;
+    if (menuPath.length === 2) {
+      // Simple: File > Save
+      script = `tell application "System Events" to tell process "${escApp}" to click menu item "${targetItem}" of menu 1 of menu bar item "${topMenu}" of menu bar 1`;
+    } else {
+      // Nested: View > Developer > Developer Tools
+      // Build the chain from the target item back up
+      let chain = `menu item "${targetItem}"`;
+      for (let i = menuPath.length - 2; i >= 1; i--) {
+        const sub = escapeForAppleScript(menuPath[i]);
+        chain = `${chain} of menu 1 of menu item "${sub}"`;
+      }
+      chain = `${chain} of menu 1 of menu bar item "${topMenu}" of menu bar 1`;
+      script = `tell application "System Events" to tell process "${escApp}" to click ${chain}`;
+    }
+
+    try {
+      runAppleScript(script);
+      return `Clicked menu: ${appName} > ${menuPath.join(" > ")}`;
+    } catch (e: any) {
+      throw new Error(
+        `Failed to click menu path [${menuPath.join(" > ")}] in ${appName}: ${e.message}`
+      );
+    }
+  },
+});
+
+// Tool 30: Clipboard
+server.addTool({
+  name: "clipboard",
+  description:
+    "Read from, write to, or clear the macOS system clipboard (pasteboard).",
+  parameters: z.object({
+    action: z
+      .enum(["read", "write", "clear"])
+      .describe("Action to perform"),
+    text: z
+      .string()
+      .optional()
+      .describe("Text to write to clipboard (required for 'write' action)"),
+  }),
+  execute: async ({ action, text }) => {
+    const { execFileSync } = child_process;
+
+    switch (action) {
+      case "read": {
+        try {
+          const content = execFileSync("pbpaste", {
+            encoding: "utf-8",
+            timeout: 5000,
+          });
+          if (content.length === 0) {
+            return "Clipboard is empty.";
+          }
+          return `Clipboard content (${content.length} chars):\n${content}`;
+        } catch (e: any) {
+          throw new Error(`Failed to read clipboard: ${e.message}`);
+        }
+      }
+      case "write": {
+        if (text === undefined)
+          throw new Error("text is required for 'write' action");
+        try {
+          child_process.execSync("pbcopy", {
+            input: text,
+            encoding: "utf-8",
+            timeout: 5000,
+          });
+          return `Wrote ${text.length} characters to clipboard.`;
+        } catch (e: any) {
+          throw new Error(`Failed to write to clipboard: ${e.message}`);
+        }
+      }
+      case "clear": {
+        try {
+          child_process.execSync("pbcopy", {
+            input: "",
+            encoding: "utf-8",
+            timeout: 5000,
+          });
+          return "Clipboard cleared.";
+        } catch (e: any) {
+          throw new Error(`Failed to clear clipboard: ${e.message}`);
+        }
+      }
+    }
+  },
+});
+
+// Tool 31: Dialog
+server.addTool({
+  name: "dialog",
+  description:
+    "Display a macOS dialog to the user and return their response. Supports alert (OK/Cancel), text prompt, list selection, and file picker.",
+  parameters: z.object({
+    type: z
+      .enum(["alert", "prompt", "choose", "fileChoose"])
+      .describe("Dialog type"),
+    message: z
+      .string()
+      .optional()
+      .describe("Message to display (for alert and prompt types)"),
+    title: z
+      .string()
+      .optional()
+      .describe("Dialog title"),
+    defaultAnswer: z
+      .string()
+      .optional()
+      .describe("Default text for prompt type"),
+    choices: z
+      .array(z.string())
+      .optional()
+      .describe("List of choices for 'choose' type"),
+    fileTypes: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Allowed file extensions for fileChoose (e.g., ["txt", "pdf", "jpg"])'
+      ),
+    multipleSelection: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Allow multiple selections for choose/fileChoose"),
+  }),
+  execute: async ({
+    type,
+    message,
+    title,
+    defaultAnswer,
+    choices,
+    fileTypes,
+    multipleSelection,
+  }) => {
+    const escMsg = message ? escapeForAppleScript(message) : "Please respond";
+    const escTitle = title ? escapeForAppleScript(title) : "";
+
+    switch (type) {
+      case "alert": {
+        let script = `display dialog "${escMsg}"`;
+        if (title) script += ` with title "${escTitle}"`;
+        script += ' buttons {"Cancel", "OK"} default button "OK"';
+        try {
+          const result = runAppleScript(script, 120000);
+          return `Dialog result: ${result}`;
+        } catch (e: any) {
+          if (e.message.includes("User canceled"))
+            return "User canceled the dialog.";
+          throw new Error(`Dialog failed: ${e.message}`);
+        }
+      }
+      case "prompt": {
+        let script = `display dialog "${escMsg}"`;
+        if (title) script += ` with title "${escTitle}"`;
+        const escDefault = defaultAnswer
+          ? escapeForAppleScript(defaultAnswer)
+          : "";
+        script += ` default answer "${escDefault}"`;
+        try {
+          const result = runAppleScript(script, 120000);
+          return `Prompt result: ${result}`;
+        } catch (e: any) {
+          if (e.message.includes("User canceled"))
+            return "User canceled the prompt.";
+          throw new Error(`Prompt failed: ${e.message}`);
+        }
+      }
+      case "choose": {
+        if (!choices || choices.length === 0)
+          throw new Error("choices array is required for 'choose' type");
+        const choiceList = choices
+          .map((c) => `"${escapeForAppleScript(c)}"`)
+          .join(", ");
+        let script = `choose from list {${choiceList}}`;
+        if (message)
+          script += ` with prompt "${escMsg}"`;
+        if (title) script += ` with title "${escTitle}"`;
+        if (multipleSelection)
+          script += " with multiple selections allowed";
+        try {
+          const result = runAppleScript(script, 120000);
+          if (result === "false") return "User canceled the selection.";
+          return `Selected: ${result}`;
+        } catch (e: any) {
+          throw new Error(`Choose dialog failed: ${e.message}`);
+        }
+      }
+      case "fileChoose": {
+        let script = 'choose file with prompt "Select a file"';
+        if (message) script = `choose file with prompt "${escMsg}"`;
+        if (fileTypes && fileTypes.length > 0) {
+          const types = fileTypes
+            .map((t) => `"${escapeForAppleScript(t)}"`)
+            .join(", ");
+          script += ` of type {${types}}`;
+        }
+        if (multipleSelection)
+          script += " with multiple selections allowed";
+        try {
+          const result = runAppleScript(script, 120000);
+          const posix = runAppleScript(`POSIX path of "${escapeForAppleScript(result)}"`);
+          return `Selected file: ${posix}`;
+        } catch (e: any) {
+          if (e.message.includes("User canceled"))
+            return "User canceled file selection.";
+          throw new Error(`File choose failed: ${e.message}`);
+        }
+      }
+    }
+  },
+});
+
+// Tool 32: Finder Control
+server.addTool({
+  name: "finderControl",
+  description:
+    "Control macOS Finder: reveal files, get selection, open with specific app, move to trash, empty trash, or open new window.",
+  parameters: z.object({
+    action: z
+      .enum([
+        "reveal",
+        "getSelection",
+        "openWith",
+        "trash",
+        "emptyTrash",
+        "newWindow",
+      ])
+      .describe("Action to perform"),
+    filePath: z
+      .string()
+      .optional()
+      .describe(
+        "File path (required for reveal, openWith, trash)"
+      ),
+    appName: z
+      .string()
+      .optional()
+      .describe("Application name for openWith action"),
+    confirmEmptyTrash: z
+      .string()
+      .optional()
+      .describe(
+        'Type "CONFIRM" to empty trash (required safety check for emptyTrash action)'
+      ),
+  }),
+  execute: async ({ action, filePath, appName, confirmEmptyTrash }) => {
+    switch (action) {
+      case "reveal": {
+        if (!filePath) throw new Error("filePath is required for reveal");
+        const resolved = path.resolve(filePath);
+        const escPath = escapeForAppleScript(resolved);
+        runAppleScript(
+          `tell application "Finder" to reveal POSIX file "${escPath}"`
+        );
+        runAppleScript('tell application "Finder" to activate');
+        return `Revealed "${resolved}" in Finder.`;
+      }
+      case "getSelection": {
+        const result = runAppleScript(
+          'tell application "Finder" to get POSIX path of (selection as alias list)'
+        );
+        if (!result || result === "")
+          return "No files selected in Finder.";
+        return `Finder selection:\n${result}`;
+      }
+      case "openWith": {
+        if (!filePath) throw new Error("filePath is required for openWith");
+        if (!appName) throw new Error("appName is required for openWith");
+        const resolved = path.resolve(filePath);
+        const { execFileSync } = child_process;
+        execFileSync("open", ["-a", appName, resolved], {
+          encoding: "utf-8",
+          timeout: 10000,
+        });
+        return `Opened "${resolved}" with "${appName}".`;
+      }
+      case "trash": {
+        if (!filePath) throw new Error("filePath is required for trash");
+        const resolved = path.resolve(filePath);
+        const escPath = escapeForAppleScript(resolved);
+        runAppleScript(
+          `tell application "Finder" to delete POSIX file "${escPath}"`
+        );
+        return `Moved "${resolved}" to Trash.`;
+      }
+      case "emptyTrash": {
+        if (confirmEmptyTrash !== "CONFIRM") {
+          throw new Error(
+            'Safety check: set confirmEmptyTrash to "CONFIRM" to empty the trash. This is irreversible.'
+          );
+        }
+        runAppleScript(
+          'tell application "Finder" to empty the trash'
+        );
+        return "Trash emptied.";
+      }
+      case "newWindow": {
+        runAppleScript(
+          'tell application "Finder" to make new Finder window'
+        );
+        runAppleScript('tell application "Finder" to activate');
+        return "New Finder window opened.";
+      }
+      default:
+        throw new Error(`Unknown action: ${action}`);
+    }
+  },
+});
+
+// Tool 33: System Info (Extended)
+server.addTool({
+  name: "systemInfoExtended",
+  description:
+    "Get extended macOS system information including OS version, computer name, battery, dark mode, WiFi, uptime, and more.",
+  parameters: z.object({}),
+  execute: async () => {
+    const { execFileSync } = child_process;
+    const info: string[] = [];
+
+    // macOS version
+    try {
+      const ver = execFileSync("sw_vers", ["-productVersion"], {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      const build = execFileSync("sw_vers", ["-buildVersion"], {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      info.push(`macOS: ${ver} (${build})`);
+    } catch {
+      info.push("macOS: unknown");
+    }
+
+    // Computer name
+    try {
+      const name = runAppleScript(
+        'computer name of (system info)'
+      );
+      info.push(`Computer: ${name}`);
+    } catch {
+      info.push("Computer: unknown");
+    }
+
+    // User name
+    try {
+      const user = execFileSync("whoami", {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      info.push(`User: ${user}`);
+    } catch {}
+
+    // Uptime
+    try {
+      const uptime = execFileSync("uptime", {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      info.push(`Uptime: ${uptime}`);
+    } catch {}
+
+    // Battery
+    try {
+      const bat = execFileSync("pmset", ["-g", "batt"], {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim();
+      const pctMatch = bat.match(/(\d+)%/);
+      const charging = bat.includes("charging") || bat.includes("AC Power");
+      if (pctMatch) {
+        info.push(
+          `Battery: ${pctMatch[1]}%${charging ? " (charging/AC)" : " (battery)"}`
+        );
+      }
+    } catch {}
+
+    // Dark mode
+    try {
+      const dark = runAppleScript(
+        'tell application "System Events" to tell appearance preferences to get dark mode'
+      );
+      info.push(`Dark mode: ${dark === "true" ? "on" : "off"}`);
+    } catch {}
+
+    // WiFi
+    try {
+      const wifi = execFileSync(
+        "networksetup",
+        ["-getairportnetwork", "en0"],
+        { encoding: "utf-8", timeout: 5000 }
+      ).trim();
+      info.push(`WiFi: ${wifi.replace("Current Wi-Fi Network: ", "")}`);
+    } catch {
+      info.push("WiFi: not available");
+    }
+
+    // Volume
+    try {
+      const vol = runAppleScript("output volume of (get volume settings)");
+      const muted = runAppleScript("output muted of (get volume settings)");
+      info.push(`Volume: ${vol}%${muted === "true" ? " (muted)" : ""}`);
+    } catch {}
+
+    return `System Information:\n${info.join("\n")}`;
+  },
+});
+
+// Tool 34: Dark Mode Control
+server.addTool({
+  name: "darkMode",
+  description:
+    "Control macOS dark/light mode appearance. Get current state, enable, disable, or toggle.",
+  parameters: z.object({
+    action: z
+      .enum(["get", "enable", "disable", "toggle"])
+      .describe("Action to perform"),
+  }),
+  execute: async ({ action }) => {
+    const getMode = () =>
+      runAppleScript(
+        'tell application "System Events" to tell appearance preferences to get dark mode'
+      );
+
+    switch (action) {
+      case "get": {
+        const isDark = getMode();
+        return `Dark mode is ${isDark === "true" ? "enabled" : "disabled"}.`;
+      }
+      case "enable":
+        runAppleScript(
+          'tell application "System Events" to tell appearance preferences to set dark mode to true'
+        );
+        return "Dark mode enabled.";
+      case "disable":
+        runAppleScript(
+          'tell application "System Events" to tell appearance preferences to set dark mode to false'
+        );
+        return "Dark mode disabled.";
+      case "toggle": {
+        const isDark = getMode();
+        const newMode = isDark === "true" ? "false" : "true";
+        runAppleScript(
+          `tell application "System Events" to tell appearance preferences to set dark mode to ${newMode}`
+        );
+        return `Dark mode ${newMode === "true" ? "enabled" : "disabled"}.`;
+      }
+    }
+  },
+});
+
+// Tool 35: Text-to-Speech
+server.addTool({
+  name: "sayText",
+  description:
+    "Speak text aloud using macOS text-to-speech. Optionally specify a voice and speaking rate.",
+  parameters: z.object({
+    text: z.string().describe("Text to speak"),
+    voice: z
+      .string()
+      .optional()
+      .describe(
+        "Voice name (e.g., 'Alex', 'Samantha', 'Daniel', 'Karen'). Use 'say -v ?' to list all available voices."
+      ),
+    rate: z
+      .number()
+      .min(50)
+      .max(500)
+      .optional()
+      .describe("Speaking rate in words per minute (default ~175, range 50-500)"),
+  }),
+  execute: async ({ text, voice, rate }) => {
+    const { execFileSync } = child_process;
+    const args: string[] = [];
+
+    if (voice) {
+      args.push("-v", voice);
+    }
+    if (rate) {
+      args.push("-r", String(rate));
+    }
+    args.push(text);
+
+    try {
+      execFileSync("say", args, {
+        encoding: "utf-8",
+        timeout: 60000,
+      });
+      return `Spoke ${text.length} characters${voice ? ` with voice "${voice}"` : ""}${rate ? ` at ${rate} wpm` : ""}.`;
+    } catch (e: any) {
+      throw new Error(`Text-to-speech failed: ${e.message}`);
+    }
+  },
+});
+
 // Parse command line arguments
 const args = process.argv.slice(2);
 const useStdio = args.includes("--stdio");
