@@ -2247,6 +2247,931 @@ server.addTool({
   },
 });
 
+// ============== DEV WORKFLOW TOOLS ==============
+
+// Tool 36: Accessibility Inspector
+server.addTool({
+  name: "accessibilityInspector",
+  description:
+    "Read the accessibility tree of a macOS application window. Returns UI element hierarchy with roles, titles, values, and enabled states. Useful for verifying UI state programmatically.",
+  parameters: z.object({
+    appName: z
+      .string()
+      .describe("Application process name (e.g., 'Safari', 'Finder', 'Code')"),
+    windowIndex: z
+      .number()
+      .min(1)
+      .optional()
+      .default(1)
+      .describe("Window index (1-based, default 1 = frontmost window)"),
+    maxDepth: z
+      .number()
+      .min(1)
+      .max(4)
+      .optional()
+      .default(4)
+      .describe("Maximum depth to traverse (default 4, max 4)"),
+    filter: z
+      .string()
+      .optional()
+      .describe(
+        "Only return elements whose role or title contains this string (case-insensitive)"
+      ),
+  }),
+  execute: async ({ appName, windowIndex, maxDepth, filter }) => {
+    const escApp = escapeForAppleScript(appName);
+
+    // First check if app is running and get window count
+    try {
+      const windowCount = runAppleScript(
+        `tell application "System Events" to tell process "${escApp}" to count of windows`
+      );
+      if (parseInt(windowCount) === 0) {
+        return `"${appName}" has no open windows.`;
+      }
+      if (windowIndex! > parseInt(windowCount)) {
+        return `"${appName}" has ${windowCount} window(s), requested index ${windowIndex}.`;
+      }
+    } catch (e: any) {
+      throw new Error(
+        `Cannot access "${appName}". Ensure it's running and Accessibility is enabled. Error: ${e.message}`
+      );
+    }
+
+    // Build recursive AppleScript to walk UI element tree
+    // We use a flattened approach since AppleScript recursion is limited
+    const script = `
+tell application "System Events"
+  tell process "${escApp}"
+    set windowRef to window ${windowIndex}
+    set output to ""
+    set output to output & "Window: " & (name of windowRef) & linefeed
+
+    -- Level 1: direct children of window
+    try
+      set elems to UI elements of windowRef
+      repeat with e in elems
+        set r to role of e
+        set t to ""
+        try
+          set t to name of e
+        end try
+        set v to ""
+        try
+          set v to value of e as text
+        end try
+        set en to true
+        try
+          set en to enabled of e
+        end try
+        set output to output & "  [" & r & "] " & t
+        if v is not "" and v is not t then set output to output & " = " & v
+        if en is false then set output to output & " (disabled)"
+        set output to output & linefeed
+
+        ${maxDepth! >= 2 ? `
+        -- Level 2
+        try
+          set elems2 to UI elements of e
+          repeat with e2 in elems2
+            set r2 to role of e2
+            set t2 to ""
+            try
+              set t2 to name of e2
+            end try
+            set v2 to ""
+            try
+              set v2 to value of e2 as text
+            end try
+            set en2 to true
+            try
+              set en2 to enabled of e2
+            end try
+            set output to output & "    [" & r2 & "] " & t2
+            if v2 is not "" and v2 is not t2 then set output to output & " = " & v2
+            if en2 is false then set output to output & " (disabled)"
+            set output to output & linefeed
+
+            ${maxDepth! >= 3 ? `
+            -- Level 3
+            try
+              set elems3 to UI elements of e2
+              repeat with e3 in elems3
+                set r3 to role of e3
+                set t3 to ""
+                try
+                  set t3 to name of e3
+                end try
+                set v3 to ""
+                try
+                  set v3 to value of e3 as text
+                end try
+                set en3 to true
+                try
+                  set en3 to enabled of e3
+                end try
+                set output to output & "      [" & r3 & "] " & t3
+                if v3 is not "" and v3 is not t3 then set output to output & " = " & v3
+                if en3 is false then set output to output & " (disabled)"
+                set output to output & linefeed
+
+                ${maxDepth! >= 4 ? `
+                -- Level 4
+                try
+                  set elems4 to UI elements of e3
+                  repeat with e4 in elems4
+                    set r4 to role of e4
+                    set t4 to ""
+                    try
+                      set t4 to name of e4
+                    end try
+                    set v4 to ""
+                    try
+                      set v4 to value of e4 as text
+                    end try
+                    set en4 to true
+                    try
+                      set en4 to enabled of e4
+                    end try
+                    set output to output & "        [" & r4 & "] " & t4
+                    if v4 is not "" and v4 is not t4 then set output to output & " = " & v4
+                    if en4 is false then set output to output & " (disabled)"
+                    set output to output & linefeed
+                  end repeat
+                end try` : ""}
+              end repeat
+            end try` : ""}
+          end repeat
+        end try` : ""}
+      end repeat
+    end try
+
+    return output
+  end tell
+end tell`.trim();
+
+    try {
+      let result = runAppleScript(script, 30000);
+
+      // Apply filter if provided
+      if (filter) {
+        const filterLower = filter.toLowerCase();
+        const lines = result.split("\n");
+        const filtered = lines.filter(
+          (line: string) =>
+            line.trim().startsWith("Window:") ||
+            line.toLowerCase().includes(filterLower)
+        );
+        result = filtered.length > 1
+          ? filtered.join("\n")
+          : `No elements matching "${filter}" found.\n\nFull tree has ${lines.length} elements.`;
+      }
+
+      return result;
+    } catch (e: any) {
+      throw new Error(`Accessibility inspection failed: ${e.message}`);
+    }
+  },
+});
+
+// Tool 37: Window Tiling
+server.addTool({
+  name: "windowTiling",
+  description:
+    "Tile/arrange application windows on screen. Snap to halves, quarters, or set exact position and size.",
+  parameters: z.object({
+    appName: z
+      .string()
+      .describe("Application name to tile"),
+    position: z
+      .enum([
+        "left-half",
+        "right-half",
+        "top-half",
+        "bottom-half",
+        "top-left",
+        "top-right",
+        "bottom-left",
+        "bottom-right",
+        "center",
+        "maximize",
+        "custom",
+      ])
+      .describe("Preset position or 'custom' for exact coordinates"),
+    x: z.number().optional().describe("X coordinate (for custom position)"),
+    y: z.number().optional().describe("Y coordinate (for custom position)"),
+    width: z.number().optional().describe("Width (for custom position)"),
+    height: z.number().optional().describe("Height (for custom position)"),
+  }),
+  execute: async ({ appName, position, x, y, width, height }) => {
+    const escApp = escapeForAppleScript(appName);
+
+    // Get screen dimensions
+    const screenBounds = runAppleScript(
+      'tell application "Finder" to get bounds of window of desktop'
+    );
+    const [, , screenW, screenH] = screenBounds.split(", ").map(Number);
+
+    // Menu bar height offset
+    const menuBarH = 25;
+    const usableH = screenH - menuBarH;
+
+    let targetX: number, targetY: number, targetW: number, targetH: number;
+
+    switch (position) {
+      case "left-half":
+        [targetX, targetY, targetW, targetH] = [0, menuBarH, Math.floor(screenW / 2), usableH];
+        break;
+      case "right-half":
+        [targetX, targetY, targetW, targetH] = [Math.floor(screenW / 2), menuBarH, Math.floor(screenW / 2), usableH];
+        break;
+      case "top-half":
+        [targetX, targetY, targetW, targetH] = [0, menuBarH, screenW, Math.floor(usableH / 2)];
+        break;
+      case "bottom-half":
+        [targetX, targetY, targetW, targetH] = [0, menuBarH + Math.floor(usableH / 2), screenW, Math.floor(usableH / 2)];
+        break;
+      case "top-left":
+        [targetX, targetY, targetW, targetH] = [0, menuBarH, Math.floor(screenW / 2), Math.floor(usableH / 2)];
+        break;
+      case "top-right":
+        [targetX, targetY, targetW, targetH] = [Math.floor(screenW / 2), menuBarH, Math.floor(screenW / 2), Math.floor(usableH / 2)];
+        break;
+      case "bottom-left":
+        [targetX, targetY, targetW, targetH] = [0, menuBarH + Math.floor(usableH / 2), Math.floor(screenW / 2), Math.floor(usableH / 2)];
+        break;
+      case "bottom-right":
+        [targetX, targetY, targetW, targetH] = [Math.floor(screenW / 2), menuBarH + Math.floor(usableH / 2), Math.floor(screenW / 2), Math.floor(usableH / 2)];
+        break;
+      case "center":
+        targetW = Math.floor(screenW * 0.6);
+        targetH = Math.floor(usableH * 0.7);
+        targetX = Math.floor((screenW - targetW) / 2);
+        targetY = menuBarH + Math.floor((usableH - targetH) / 2);
+        break;
+      case "maximize":
+        [targetX, targetY, targetW, targetH] = [0, menuBarH, screenW, usableH];
+        break;
+      case "custom":
+        if (x === undefined || y === undefined || width === undefined || height === undefined) {
+          throw new Error("x, y, width, and height are required for custom position");
+        }
+        [targetX, targetY, targetW, targetH] = [x, y, width, height];
+        break;
+      default:
+        throw new Error(`Unknown position: ${position}`);
+    }
+
+    // Activate app first, then set position and size
+    runAppleScript(`tell application "${escApp}" to activate`);
+    runAppleScript(
+      `tell application "System Events" to tell process "${escApp}"
+        set position of window 1 to {${targetX}, ${targetY}}
+        set size of window 1 to {${targetW}, ${targetH}}
+      end tell`
+    );
+
+    return `Tiled "${appName}" to ${position}: (${targetX}, ${targetY}) ${targetW}x${targetH}`;
+  },
+});
+
+// Tool 38: Port Check
+server.addTool({
+  name: "portCheck",
+  description:
+    "Check if a network port is in use, what process owns it, or list all listening ports. Useful for verifying dev servers and checking port conflicts.",
+  parameters: z.object({
+    action: z
+      .enum(["check", "list"])
+      .describe("'check' a specific port, or 'list' all listening ports"),
+    port: z
+      .number()
+      .min(1)
+      .max(65535)
+      .optional()
+      .describe("Port number to check (required for 'check' action)"),
+    protocol: z
+      .enum(["tcp", "udp", "both"])
+      .optional()
+      .default("tcp")
+      .describe("Protocol to check (default: tcp)"),
+  }),
+  execute: async ({ action, port, protocol }) => {
+    const { execFileSync } = child_process;
+
+    if (action === "check") {
+      if (!port) throw new Error("port is required for 'check' action");
+
+      try {
+        const output = execFileSync(
+          "lsof",
+          ["-i", `${protocol === "udp" ? "UDP" : protocol === "both" ? "" : "TCP"}:${port}`, "-P", "-n"],
+          { encoding: "utf-8", timeout: 10000 }
+        );
+        const lines = output.trim().split("\n");
+        if (lines.length <= 1) {
+          return `Port ${port} is free (not in use).`;
+        }
+        return `Port ${port} is IN USE:\n${lines.join("\n")}`;
+      } catch (e: any) {
+        // lsof returns exit code 1 when no matches found
+        if (e.status === 1) {
+          return `Port ${port} is free (not in use).`;
+        }
+        throw new Error(`Port check failed: ${e.message}`);
+      }
+    }
+
+    if (action === "list") {
+      try {
+        const flags = protocol === "udp"
+          ? ["-iUDP", "-P", "-n"] // UDP has no LISTEN state
+          : protocol === "both"
+          ? ["-i", "-P", "-n", "-sTCP:LISTEN"]
+          : ["-iTCP", "-P", "-n", "-sTCP:LISTEN"];
+        const output = execFileSync("lsof", flags, {
+          encoding: "utf-8",
+          timeout: 10000,
+        });
+        const lines = output.trim().split("\n");
+        return `Listening ports (${lines.length - 1} services):\n${lines.join("\n")}`;
+      } catch (e: any) {
+        if (e.status === 1) return "No listening ports found.";
+        throw new Error(`Port list failed: ${e.message}`);
+      }
+    }
+
+    throw new Error("Invalid action");
+  },
+});
+
+// Tool 39: File Watcher
+server.addTool({
+  name: "fileWatcher",
+  description:
+    "Watch a file or directory for changes. Blocks until a change is detected or timeout expires. Useful for waiting for build output, log updates, or file creation.",
+  parameters: z.object({
+    path: z.string().describe("File or directory path to watch"),
+    timeoutSeconds: z
+      .number()
+      .min(1)
+      .max(300)
+      .optional()
+      .default(30)
+      .describe("Timeout in seconds (default 30, max 300)"),
+    event: z
+      .enum(["any", "create", "modify", "delete"])
+      .optional()
+      .default("any")
+      .describe("Type of change to watch for (default: any)"),
+  }),
+  execute: async ({ path: watchPath, timeoutSeconds, event }) => {
+    const { execFileSync } = child_process;
+    const resolved = path.resolve(watchPath);
+    const fs = require("fs");
+
+    // Check if path exists (for create, we watch the parent)
+    const watchTarget = event === "create" && !fs.existsSync(resolved)
+      ? path.dirname(resolved)
+      : resolved;
+
+    if (!fs.existsSync(watchTarget)) {
+      throw new Error(`Path does not exist: ${watchTarget}`);
+    }
+
+    // Get initial state
+    const getState = (p: string) => {
+      try {
+        const stat = fs.statSync(p);
+        return { exists: true, mtime: stat.mtimeMs, size: stat.size };
+      } catch {
+        return { exists: false, mtime: 0, size: 0 };
+      }
+    };
+
+    let lastState = getState(resolved);
+    const startTime = Date.now();
+    const timeoutMs = timeoutSeconds! * 1000;
+    let sawDelete = false;
+
+    // Poll for changes
+    while (Date.now() - startTime < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 250)); // 250ms poll interval
+
+      const currentState = getState(resolved);
+
+      let changed = false;
+      let changeType = "";
+
+      // Track delete-then-create for "create" event on pre-existing files
+      if (!currentState.exists && lastState.exists) {
+        sawDelete = true;
+      }
+
+      if (event === "create" || event === "any") {
+        // Fires if: file didn't exist initially and now does, OR was deleted and recreated
+        if ((!lastState.exists || sawDelete) && currentState.exists && sawDelete) {
+          changed = true;
+          changeType = "created";
+        } else if (!lastState.exists && currentState.exists) {
+          changed = true;
+          changeType = "created";
+        }
+      }
+      if (event === "delete" || event === "any") {
+        if (lastState.exists && !currentState.exists) {
+          changed = true;
+          changeType = "deleted";
+        }
+      }
+      if (event === "modify" || event === "any") {
+        if (
+          currentState.exists &&
+          lastState.exists &&
+          (currentState.mtime !== lastState.mtime ||
+            currentState.size !== lastState.size)
+        ) {
+          changed = true;
+          changeType = "modified";
+        }
+      }
+
+      if (changed) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        return `File ${changeType}: ${resolved} (detected in ${elapsed}s). Size: ${currentState.size} bytes.`;
+      }
+
+      lastState = currentState;
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    return `Timeout after ${elapsed}s — no ${event === "any" ? "" : event + " "}changes detected on: ${resolved}`;
+  },
+});
+
+// Tool 40: Quick Look
+server.addTool({
+  name: "quickLook",
+  description:
+    "Preview a file using macOS Quick Look (the spacebar preview). Opens a temporary preview window. Useful for verifying generated files (PDFs, images, documents).",
+  parameters: z.object({
+    filePath: z.string().describe("Path to the file to preview"),
+    seconds: z
+      .number()
+      .min(1)
+      .max(30)
+      .optional()
+      .default(5)
+      .describe("How many seconds to show the preview (default 5, max 30)"),
+  }),
+  execute: async ({ filePath, seconds }) => {
+    const { execFileSync, spawn } = child_process;
+    const resolved = path.resolve(filePath);
+    const fs = require("fs");
+
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`File not found: ${resolved}`);
+    }
+
+    // Get file info
+    const stat = fs.statSync(resolved);
+    const ext = path.extname(resolved);
+    const sizeKB = (stat.size / 1024).toFixed(1);
+
+    // Launch Quick Look in background, then kill after timeout
+    const ql = spawn("qlmanage", ["-p", resolved], {
+      stdio: "ignore",
+      detached: true,
+    });
+    ql.unref();
+
+    // Wait then kill
+    await new Promise((resolve) => setTimeout(resolve, seconds! * 1000));
+    try {
+      process.kill(ql.pid!, "SIGTERM");
+    } catch {}
+
+    return `Quick Look preview shown for ${seconds}s: ${path.basename(resolved)} (${ext}, ${sizeKB} KB)`;
+  },
+});
+
+// Tool 41: Spotlight Search
+server.addTool({
+  name: "spotlightSearch",
+  description:
+    "Search for files using macOS Spotlight (mdfind). Faster than recursive filesystem search for indexed locations. Supports filename search, content search, and metadata queries.",
+  parameters: z.object({
+    query: z.string().describe("Search query"),
+    searchType: z
+      .enum(["name", "content", "query"])
+      .optional()
+      .default("name")
+      .describe(
+        "'name' searches filenames, 'content' searches file contents, 'query' uses raw mdfind query syntax"
+      ),
+    directory: z
+      .string()
+      .optional()
+      .describe("Limit search to this directory"),
+    maxResults: z
+      .number()
+      .min(1)
+      .max(100)
+      .optional()
+      .default(20)
+      .describe("Maximum results to return (default 20)"),
+  }),
+  execute: async ({ query, searchType, directory, maxResults }) => {
+    const { execFileSync } = child_process;
+    const args: string[] = [];
+
+    if (searchType === "name") {
+      args.push("-name", query);
+    } else if (searchType === "content") {
+      // Explicit content predicate for file contents search
+      const escaped = query.replace(/'/g, "\\'");
+      args.push(`kMDItemTextContent == "*${escaped}*"cd`);
+    } else {
+      // Raw mdfind query syntax (e.g., "kMDItemKind == 'PDF Document'")
+      args.push(query);
+    }
+
+    if (directory) {
+      args.push("-onlyin", path.resolve(directory));
+    }
+
+    try {
+      const output = execFileSync("mdfind", args, {
+        encoding: "utf-8",
+        timeout: 15000,
+      });
+
+      const results = output.trim().split("\n").filter(Boolean);
+      const total = results.length;
+      const limited = results.slice(0, maxResults!);
+
+      if (total === 0) {
+        return `No results found for "${query}".`;
+      }
+
+      let response = `Found ${total} result(s)${total > maxResults! ? ` (showing first ${maxResults})` : ""}:\n`;
+      response += limited.join("\n");
+      return response;
+    } catch (e: any) {
+      throw new Error(`Spotlight search failed: ${e.message}`);
+    }
+  },
+});
+
+// Tool 42: Pasteboard Types
+server.addTool({
+  name: "pasteboardInfo",
+  description:
+    "Get detailed information about clipboard contents including data types (text, HTML, RTF, image, file URLs). Useful for verifying copy operations include the right formats.",
+  parameters: z.object({}),
+  execute: async () => {
+    // Get pasteboard types via AppleScript
+    const types = runAppleScript(
+      'tell application "System Events" to get (clipboard info) as text'
+    );
+
+    // Also get plain text content length
+    let textPreview = "";
+    try {
+      const { execFileSync } = child_process;
+      const text = execFileSync("pbpaste", {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      if (text.length > 0) {
+        const preview = text.substring(0, 200);
+        textPreview = `\n\nText preview (${text.length} chars):\n${preview}${text.length > 200 ? "..." : ""}`;
+      }
+    } catch {}
+
+    return `Clipboard formats:\n${types}${textPreview}`;
+  },
+});
+
+// Tool 43: Screen Recording
+server.addTool({
+  name: "screenRecording",
+  description:
+    "Start or stop a macOS screen recording. Recordings are saved as .mov files. Useful for capturing test evidence or demo recordings.",
+  parameters: z.object({
+    action: z
+      .enum(["start", "stop", "status"])
+      .describe("Action to perform"),
+    outputPath: z
+      .string()
+      .optional()
+      .describe(
+        "Output file path for recording (default: ~/Desktop/recording-{timestamp}.mov)"
+      ),
+    duration: z
+      .number()
+      .min(1)
+      .max(300)
+      .optional()
+      .describe("Auto-stop after N seconds (optional, max 300)"),
+    audioEnabled: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe("Record system audio (default: false)"),
+  }),
+  execute: async ({ action, outputPath, duration, audioEnabled }) => {
+    const { execFileSync, spawn } = child_process;
+    const fs = require("fs");
+    const pidFile = "/tmp/automation-mcp-screenrecord.pid";
+
+    if (action === "status") {
+      if (fs.existsSync(pidFile)) {
+        const pid = fs.readFileSync(pidFile, "utf-8").trim();
+        try {
+          process.kill(parseInt(pid), 0); // Check if alive
+          return `Screen recording is active (PID: ${pid}).`;
+        } catch {
+          fs.unlinkSync(pidFile);
+          return "No active screen recording.";
+        }
+      }
+      return "No active screen recording.";
+    }
+
+    if (action === "stop") {
+      if (!fs.existsSync(pidFile)) {
+        return "No active screen recording to stop.";
+      }
+      const pid = fs.readFileSync(pidFile, "utf-8").trim();
+      try {
+        // screencapture responds to SIGINT to finalize the recording
+        process.kill(parseInt(pid), "SIGINT");
+        fs.unlinkSync(pidFile);
+        // Wait a moment for file finalization
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return `Screen recording stopped (PID: ${pid}). File is being finalized.`;
+      } catch (e: any) {
+        try { fs.unlinkSync(pidFile); } catch {}
+        return `Recording process ${pid} not found (may have already stopped).`;
+      }
+    }
+
+    if (action === "start") {
+      // Check for existing recording
+      if (fs.existsSync(pidFile)) {
+        const existingPid = fs.readFileSync(pidFile, "utf-8").trim();
+        try {
+          process.kill(parseInt(existingPid), 0);
+          return `A recording is already active (PID: ${existingPid}). Stop it first.`;
+        } catch {
+          fs.unlinkSync(pidFile);
+        }
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
+      const outFile = outputPath
+        ? path.resolve(outputPath)
+        : path.join(os.homedir(), "Desktop", `recording-${timestamp}.mov`);
+
+      const args = ["-v"]; // -v = video recording
+      if (audioEnabled) args.push("-g"); // -g = capture audio from default input
+      if (duration) args.push("-V", String(duration)); // -V = timed capture (screencapture manages duration)
+      args.push(outFile);
+
+      const proc = spawn("screencapture", args, {
+        stdio: "ignore",
+        detached: true,
+      });
+      proc.unref();
+
+      if (proc.pid) {
+        fs.writeFileSync(pidFile, String(proc.pid));
+
+        return `Screen recording started (PID: ${proc.pid}). Output: ${outFile}${duration ? `. Auto-stops after ${duration}s (managed by screencapture -V).` : ". Use action='stop' to finish."}`;
+      }
+      throw new Error("Failed to start screen recording.");
+    }
+
+    throw new Error("Invalid action");
+  },
+});
+
+// Tool 44: Defaults Control
+server.addTool({
+  name: "defaultsControl",
+  description:
+    "Read or write macOS user defaults (plist preferences). Useful for toggling app settings, checking config values, or setting test preferences.",
+  parameters: z.object({
+    action: z
+      .enum(["read", "write", "delete", "domains"])
+      .describe("Action to perform"),
+    domain: z
+      .string()
+      .optional()
+      .describe(
+        "Preference domain (e.g., 'com.apple.finder', 'NSGlobalDomain'). Required for read/write/delete."
+      ),
+    key: z
+      .string()
+      .optional()
+      .describe("Preference key (omit to read all keys in domain)"),
+    value: z
+      .string()
+      .optional()
+      .describe("Value to write (required for 'write' action)"),
+    valueType: z
+      .enum(["string", "int", "float", "bool", "array-add"])
+      .optional()
+      .default("string")
+      .describe("Value type for write (default: string)"),
+  }),
+  execute: async ({ action, domain, key, value, valueType }) => {
+    const { execFileSync } = child_process;
+
+    if (action === "domains") {
+      const output = execFileSync("defaults", ["domains"], {
+        encoding: "utf-8",
+        timeout: 10000,
+      });
+      const domains = output.trim().split(", ");
+      return `Preference domains (${domains.length}):\n${domains.sort().join("\n")}`;
+    }
+
+    if (!domain) throw new Error("domain is required for read/write/delete");
+
+    if (action === "read") {
+      try {
+        const args = key ? ["read", domain, key] : ["read", domain];
+        const output = execFileSync("defaults", args, {
+          encoding: "utf-8",
+          timeout: 10000,
+        });
+        return key
+          ? `${domain} ${key} = ${output.trim()}`
+          : `${domain} defaults:\n${output.trim()}`;
+      } catch (e: any) {
+        if (e.message.includes("does not exist")) {
+          return `Key "${key}" does not exist in domain "${domain}".`;
+        }
+        throw new Error(`Defaults read failed: ${e.message}`);
+      }
+    }
+
+    if (action === "write") {
+      if (!key) throw new Error("key is required for write");
+      if (value === undefined) throw new Error("value is required for write");
+
+      const typeFlag =
+        valueType === "int" ? "-int"
+        : valueType === "float" ? "-float"
+        : valueType === "bool" ? "-bool"
+        : valueType === "array-add" ? "-array-add"
+        : "-string";
+
+      execFileSync("defaults", ["write", domain, key, typeFlag, value], {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      return `Set ${domain} ${key} = ${value} (${valueType})`;
+    }
+
+    if (action === "delete") {
+      if (!key) throw new Error("key is required for delete");
+      try {
+        execFileSync("defaults", ["delete", domain, key], {
+          encoding: "utf-8",
+          timeout: 5000,
+        });
+        return `Deleted ${domain} ${key}`;
+      } catch (e: any) {
+        return `Key "${key}" not found in "${domain}".`;
+      }
+    }
+
+    throw new Error("Invalid action");
+  },
+});
+
+// Tool 45: Network Diagnostics
+server.addTool({
+  name: "networkDiagnostics",
+  description:
+    "Network diagnostic utilities: ping a host, DNS lookup, check HTTP endpoint, or get network interfaces. Useful for verifying API endpoints before integration tests.",
+  parameters: z.object({
+    action: z
+      .enum(["ping", "dns", "http", "interfaces"])
+      .describe("Diagnostic action to perform"),
+    host: z
+      .string()
+      .optional()
+      .describe("Hostname or IP (required for ping, dns, http)"),
+    count: z
+      .number()
+      .min(1)
+      .max(10)
+      .optional()
+      .default(3)
+      .describe("Ping count (default 3, max 10)"),
+    timeout: z
+      .number()
+      .min(1)
+      .max(30)
+      .optional()
+      .default(5)
+      .describe("Timeout in seconds (default 5)"),
+  }),
+  execute: async ({ action, host, count, timeout }) => {
+    const { execFileSync } = child_process;
+
+    if (action === "ping") {
+      if (!host) throw new Error("host is required for ping");
+      try {
+        const output = execFileSync(
+          "ping",
+          ["-c", String(count), "-W", String(timeout! * 1000), host],
+          { encoding: "utf-8", timeout: (timeout! + 5) * 1000 }
+        );
+        return `Ping ${host}:\n${output.trim()}`;
+      } catch (e: any) {
+        return `Ping ${host} failed:\n${e.stdout || e.message}`;
+      }
+    }
+
+    if (action === "dns") {
+      if (!host) throw new Error("host is required for dns");
+      try {
+        const output = execFileSync(
+          "dig",
+          ["+short", host],
+          { encoding: "utf-8", timeout: timeout! * 1000 }
+        );
+        const records = output.trim();
+        if (!records) return `No DNS records found for ${host}.`;
+        return `DNS lookup ${host}:\n${records}`;
+      } catch (e: any) {
+        // Fallback to host command
+        try {
+          const output = execFileSync("host", [host], {
+            encoding: "utf-8",
+            timeout: timeout! * 1000,
+          });
+          return `DNS lookup ${host}:\n${output.trim()}`;
+        } catch {
+          throw new Error(`DNS lookup failed: ${e.message}`);
+        }
+      }
+    }
+
+    if (action === "http") {
+      if (!host) throw new Error("host is required for http");
+      const url = host.startsWith("http") ? host : `https://${host}`;
+      try {
+        const output = execFileSync(
+          "curl",
+          [
+            "-sS",
+            "-o", "/dev/null",
+            "-w", "HTTP %{http_code} | %{time_total}s | %{size_download} bytes | %{remote_ip}",
+            "--max-time", String(timeout),
+            url,
+          ],
+          { encoding: "utf-8", timeout: (timeout! + 5) * 1000 }
+        );
+        return `HTTP check ${url}:\n${output.trim()}`;
+      } catch (e: any) {
+        return `HTTP check ${url} failed:\n${e.stdout || e.stderr || e.message}`;
+      }
+    }
+
+    if (action === "interfaces") {
+      try {
+        const output = execFileSync("ifconfig", {
+          encoding: "utf-8",
+          timeout: 5000,
+        });
+        // Parse to show just interface names and IPs
+        const lines = output.split("\n");
+        const summary: string[] = [];
+        let currentIface = "";
+        for (const line of lines) {
+          const ifaceMatch = line.match(/^(\w+):/);
+          if (ifaceMatch) currentIface = ifaceMatch[1];
+          const inetMatch = line.match(/inet\s+([\d.]+)/);
+          if (inetMatch && currentIface) {
+            summary.push(`${currentIface}: ${inetMatch[1]}`);
+          }
+        }
+        return `Network interfaces:\n${summary.join("\n") || "No interfaces found"}`;
+      } catch (e: any) {
+        throw new Error(`Failed to list interfaces: ${e.message}`);
+      }
+    }
+
+    throw new Error("Invalid action");
+  },
+});
+
 // Parse command line arguments
 const args = process.argv.slice(2);
 const useStdio = args.includes("--stdio");
