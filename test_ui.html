@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MCP Test UI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 20px; }
+    h1 { text-align: center; margin-bottom: 20px; color: #89b4fa; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 900px; margin: 0 auto; }
+    .card { background: #313244; border-radius: 12px; padding: 20px; }
+    .card h2 { color: #f38ba8; margin-bottom: 12px; font-size: 16px; }
+    label { display: block; margin: 8px 0 4px; color: #a6adc8; font-size: 14px; }
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%; padding: 8px 12px; border: 1px solid #585b70; border-radius: 6px;
+      background: #45475a; color: #cdd6f4; font-size: 14px; outline: none;
+    }
+    input[type="text"]:focus, textarea:focus { border-color: #89b4fa; }
+    textarea { height: 80px; resize: vertical; }
+    button {
+      padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+      font-size: 14px; margin: 4px; transition: background 0.2s;
+    }
+    .btn-primary { background: #89b4fa; color: #1e1e2e; }
+    .btn-primary:hover { background: #74c7ec; }
+    .btn-danger { background: #f38ba8; color: #1e1e2e; }
+    .btn-success { background: #a6e3a1; color: #1e1e2e; }
+    .btn-warning { background: #f9e2af; color: #1e1e2e; }
+    .checkbox-group { display: flex; flex-direction: column; gap: 6px; }
+    .checkbox-group label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; accent-color: #89b4fa; }
+    .slider-container { display: flex; align-items: center; gap: 12px; }
+    input[type="range"] { flex: 1; accent-color: #89b4fa; }
+    .output { font-family: monospace; font-size: 13px; color: #a6e3a1; min-height: 24px; margin-top: 8px; }
+    .drag-zone {
+      width: 100%; height: 80px; border: 2px dashed #585b70; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center; color: #6c7086;
+      transition: all 0.2s;
+    }
+    .drag-zone.over { border-color: #89b4fa; background: rgba(137,180,250,0.1); color: #89b4fa; }
+    .scroll-box {
+      max-height: 150px; overflow-y: auto; background: #45475a; border-radius: 6px;
+      padding: 12px; font-size: 13px; line-height: 1.6;
+    }
+    .scroll-box::-webkit-scrollbar { width: 8px; }
+    .scroll-box::-webkit-scrollbar-thumb { background: #585b70; border-radius: 4px; }
+    #click-target {
+      width: 120px; height: 120px; border-radius: 50%; background: #585b70;
+      display: flex; align-items: center; justify-content: center; flex-direction: column;
+      margin: 10px auto; cursor: pointer; transition: all 0.15s; user-select: none;
+    }
+    #click-target:active { transform: scale(0.95); background: #89b4fa; }
+    #click-count { font-size: 28px; font-weight: bold; color: #cdd6f4; }
+    #click-label { font-size: 11px; color: #a6adc8; margin-top: 2px; }
+    .status-bar {
+      max-width: 900px; margin: 20px auto 0; padding: 12px 20px; background: #313244;
+      border-radius: 8px; font-family: monospace; font-size: 13px; color: #a6adc8;
+    }
+    .tab-bar { display: flex; gap: 0; margin-bottom: 12px; }
+    .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: #6c7086; }
+    .tab.active { color: #89b4fa; border-bottom-color: #89b4fa; }
+    .tab:hover { color: #cdd6f4; }
+  </style>
+</head>
+<body>
+
+<h1>MCP Automation Test UI</h1>
+
+<div class="grid">
+  <!-- Card 1: Text Input -->
+  <div class="card">
+    <h2>Text Input</h2>
+    <label for="name-input">Name</label>
+    <input type="text" id="name-input" placeholder="Type your name here..." />
+    <label for="email-input">Email</label>
+    <input type="text" id="email-input" placeholder="email@example.com" />
+    <label for="notes">Notes</label>
+    <textarea id="notes" placeholder="Enter notes..."></textarea>
+    <div class="output" id="text-output"></div>
+  </div>
+
+  <!-- Card 2: Buttons & Click Target -->
+  <div class="card">
+    <h2>Buttons & Click Target</h2>
+    <div style="display:flex;flex-wrap:wrap;margin-bottom:12px;">
+      <button class="btn-primary" id="btn-submit" onclick="logAction('Submit clicked')">Submit</button>
+      <button class="btn-danger" id="btn-reset" onclick="resetAll()">Reset</button>
+      <button class="btn-success" id="btn-save" onclick="logAction('Save clicked')">Save</button>
+      <button class="btn-warning" id="btn-cancel" onclick="logAction('Cancel clicked')">Cancel</button>
+    </div>
+    <div id="click-target" onclick="incrementClick()">
+      <span id="click-count">0</span>
+      <span id="click-label">clicks</span>
+    </div>
+    <div class="output" id="button-output"></div>
+  </div>
+
+  <!-- Card 3: Checkboxes & Radio -->
+  <div class="card">
+    <h2>Checkboxes & Radio</h2>
+    <div class="checkbox-group">
+      <label><input type="checkbox" id="chk-dark" checked /> Dark Mode</label>
+      <label><input type="checkbox" id="chk-notify" /> Notifications</label>
+      <label><input type="checkbox" id="chk-auto" /> Auto-save</label>
+    </div>
+    <label style="margin-top:12px;color:#f38ba8;">Priority</label>
+    <div class="checkbox-group">
+      <label><input type="radio" name="priority" value="low" /> Low</label>
+      <label><input type="radio" name="priority" value="medium" checked /> Medium</label>
+      <label><input type="radio" name="priority" value="high" /> High</label>
+    </div>
+    <label>Slider</label>
+    <div class="slider-container">
+      <input type="range" id="slider" min="0" max="100" value="50" oninput="document.getElementById('slider-val').textContent=this.value" />
+      <span id="slider-val">50</span>
+    </div>
+  </div>
+
+  <!-- Card 4: Select & Dropdown -->
+  <div class="card">
+    <h2>Select & Number</h2>
+    <label for="color-select">Color Theme</label>
+    <select id="color-select" onchange="logAction('Selected: '+this.value)">
+      <option value="blue">Blue</option>
+      <option value="green">Green</option>
+      <option value="red">Red</option>
+      <option value="purple">Purple</option>
+    </select>
+    <label for="num-input">Quantity</label>
+    <input type="number" id="num-input" value="1" min="0" max="99" />
+    <label>Tabs</label>
+    <div class="tab-bar">
+      <div class="tab active" id="tab-1" onclick="switchTab(1)">Overview</div>
+      <div class="tab" id="tab-2" onclick="switchTab(2)">Details</div>
+      <div class="tab" id="tab-3" onclick="switchTab(3)">Settings</div>
+    </div>
+    <div class="output" id="tab-content">Overview tab selected</div>
+  </div>
+
+  <!-- Card 5: Scroll & Drag -->
+  <div class="card">
+    <h2>Scrollable Content</h2>
+    <div class="scroll-box" id="scroll-box">
+      <p>Line 1: The quick brown fox jumps over the lazy dog.</p>
+      <p>Line 2: Pack my box with five dozen liquor jugs.</p>
+      <p>Line 3: How vexingly quick daft zebras jump.</p>
+      <p>Line 4: The five boxing wizards jump quickly.</p>
+      <p>Line 5: Jackdaws love my big sphinx of quartz.</p>
+      <p>Line 6: Two driven jocks help fax my big quiz.</p>
+      <p>Line 7: The jay, pig, fox, zebra and my wolves quack.</p>
+      <p>Line 8: Sympathizing would fix Quaker objectives.</p>
+      <p>Line 9: A wizard's job is to vex chumps quickly in fog.</p>
+      <p>Line 10: Watch Jeopardy, Alex Trebek's fun TV quiz game.</p>
+      <p>Line 11: By Jove, my quick study of lexicography won a prize.</p>
+      <p>Line 12: Crazy Frederick bought many very exquisite opal jewels.</p>
+    </div>
+  </div>
+
+  <!-- Card 6: Drag Zone -->
+  <div class="card">
+    <h2>Drag & Drop Zone</h2>
+    <div class="drag-zone" id="drag-zone"
+      ondragover="event.preventDefault();this.classList.add('over')"
+      ondragleave="this.classList.remove('over')"
+      ondrop="event.preventDefault();this.classList.remove('over');this.textContent='Dropped!'"
+    >
+      Drag something here
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn-primary" id="btn-double" ondblclick="logAction('Double-click detected!')">Double-click me</button>
+    </div>
+    <div class="output" id="drag-output"></div>
+  </div>
+</div>
+
+<div class="status-bar" id="status-bar">
+  Status: Ready | Last action: none | Time: <span id="clock"></span>
+</div>
+
+<script>
+  let clickCount = 0;
+
+  function incrementClick() {
+    clickCount++;
+    document.getElementById('click-count').textContent = clickCount;
+    logAction('Click target: ' + clickCount);
+  }
+
+  function logAction(msg) {
+    const bar = document.getElementById('status-bar');
+    bar.textContent = 'Status: Active | Last action: ' + msg + ' | Time: ' + new Date().toLocaleTimeString();
+  }
+
+  function resetAll() {
+    clickCount = 0;
+    document.getElementById('click-count').textContent = '0';
+    document.getElementById('name-input').value = '';
+    document.getElementById('email-input').value = '';
+    document.getElementById('notes').value = '';
+    document.getElementById('num-input').value = '1';
+    document.getElementById('slider').value = '50';
+    document.getElementById('slider-val').textContent = '50';
+    logAction('Reset all');
+  }
+
+  function switchTab(n) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + n).classList.add('active');
+    const labels = ['Overview', 'Details', 'Settings'];
+    document.getElementById('tab-content').textContent = labels[n-1] + ' tab selected';
+    logAction('Tab ' + n + ': ' + labels[n-1]);
+  }
+
+  // Update clock
+  setInterval(() => {
+    const el = document.getElementById('clock');
+    if (el) el.textContent = new Date().toLocaleTimeString();
+  }, 1000);
+
+  // Keyboard events
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+      document.getElementById('text-output').textContent = 'Typing: ' + e.target.value + e.key;
+    }
+  });
+</script>
+
+</body>
+</html>
