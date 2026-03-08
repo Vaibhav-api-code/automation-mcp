@@ -2490,24 +2490,58 @@ interface UIElement {
   size: { w: number; h: number };
 }
 
+// Helper: Sanitize element path/scope to prevent AppleScript injection
+// Only allows: letters, digits, spaces, angle brackets (>), hyphens, underscores
+function sanitizeElementRef(input: string): string {
+  return input.replace(/[^a-zA-Z0-9 >\-_]/g, "");
+}
+
+// Helper: Escape string for safe JXA interpolation (single quotes)
+function escapeForJXA(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+// Helper: Convert CamelCase role name to space-separated AppleScript form
+// e.g., "ScrollArea" → "scroll area", "CheckBox" → "check box", "Button" → "button"
+function roleNameToAppleScript(roleName: string): string {
+  // Insert space before uppercase letters (except at start), then lowercase all
+  return roleName
+    .replace(/([A-Z])/g, " $1")
+    .trim()
+    .toLowerCase();
+}
+
+// Helper: Sanitize text values to prevent pipe-delimiter corruption
+// Replaces newlines, carriage returns, and pipe sequences with safe alternatives
+function sanitizeElementText(text: string): string {
+  return text
+    .replace(/\r?\n/g, " ")
+    .replace(/\r/g, " ")
+    .replace(/\|\|\|/g, " | ");
+}
+
 // Helper: Parse pipe-delimited AppleScript output into UIElement array
 function parseElementOutput(rawOutput: string): UIElement[] {
   const elements: UIElement[] = [];
   const lines = rawOutput.split("\n").filter((l) => l.includes("|||"));
   for (const line of lines) {
     const parts = line.split("|||");
-    if (parts.length < 10) continue;
+    if (parts.length < 11) continue;
     const [pathStr, role, title, desc, help, value, enabled, posX, posY, sizeW, sizeH] = parts;
+    const parsedPosX = parseInt(posX);
+    const parsedPosY = parseInt(posY);
+    const parsedSizeW = parseInt(sizeW);
+    const parsedSizeH = parseInt(sizeH);
     elements.push({
       path: pathStr.trim(),
       role: role.trim(),
-      title: title.trim() === "missing value" ? "" : title.trim(),
-      description: desc.trim() === "missing value" ? "" : desc.trim(),
-      help: help.trim() === "missing value" ? "" : help.trim(),
-      value: value.trim() === "missing value" ? "" : value.trim(),
+      title: title.trim() === "missing value" ? "" : sanitizeElementText(title.trim()),
+      description: desc.trim() === "missing value" ? "" : sanitizeElementText(desc.trim()),
+      help: help.trim() === "missing value" ? "" : sanitizeElementText(help.trim()),
+      value: value.trim() === "missing value" ? "" : sanitizeElementText(value.trim()),
       enabled: enabled.trim() === "true",
-      position: { x: parseInt(posX) || 0, y: parseInt(posY) || 0 },
-      size: { w: parseInt(sizeW) || 0, h: parseInt(sizeH) || 0 },
+      position: { x: isNaN(parsedPosX) ? 0 : parsedPosX, y: isNaN(parsedPosY) ? 0 : parsedPosY },
+      size: { w: isNaN(parsedSizeW) ? 0 : parsedSizeW, h: isNaN(parsedSizeH) ? 0 : parsedSizeH },
     });
   }
   return elements;
@@ -2516,7 +2550,9 @@ function parseElementOutput(rawOutput: string): UIElement[] {
 // Helper: Convert element path to AppleScript reference
 // "scroll area 2 > checkbox 46" → "checkbox 46 of scroll area 2 of window 1"
 function pathToAxReference(elementPath: string, windowIndex: number = 1): string {
-  const parts = elementPath.split(" > ").map((p) => p.trim());
+  const sanitized = sanitizeElementRef(elementPath);
+  const parts = sanitized.split(" > ").map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0) throw new Error("Invalid element path: empty after sanitization");
   // Reverse: deepest element first, window last
   return parts.reverse().join(" of ") + ` of window ${windowIndex}`;
 }
@@ -2531,7 +2567,7 @@ function buildElementQueryScript(
 ): string {
   const escapedApp = escapeForAppleScript(appName);
   const scopeRef = scope
-    ? `${escapeForAppleScript(scope)} of window ${windowIndex}`
+    ? `${sanitizeElementRef(scope)} of window ${windowIndex}`
     : `window ${windowIndex}`;
 
   // Build the role filter condition
@@ -2555,7 +2591,7 @@ function buildElementQueryScript(
                 set childRoleWord to childRole
                 if childRoleWord starts with "AX" then set childRoleWord to text 3 thru -1 of childRoleWord
                 -- Convert CamelCase to space-separated lowercase for path
-                set childPathName to my toLowerFirst(childRoleWord)
+                set childPathName to my camelToSpace(childRoleWord)
                 -- Count siblings of same role for indexing
                 set childIdx to 0
                 set childCount to 0
@@ -2568,22 +2604,22 @@ function buildElementQueryScript(
                 end repeat
                 set childPathStr to elemPathStr & " > " & childPathName
                 if childCount > 1 then set childPathStr to elemPathStr & " > " & childPathName & " " & childIdx
-                ${roleCondition ? `set skip to false\n                ${roleCondition}\n                  ${roleSkip}\n                ${roleEnd}\n                if not skip then` : ""}
+                ${roleFilter ? `set skip to false\n                if role of child as string is not "${escapeForAppleScript(roleFilter)}" then\n                  set skip to true\n                end if\n                if not skip then` : ""}
                 set childTitle to ""
                 try
-                  set childTitle to title of child as string
+                  set childTitle to my sanitizeText(title of child as string)
                 end try
                 set childDesc to ""
                 try
-                  set childDesc to description of child as string
+                  set childDesc to my sanitizeText(description of child as string)
                 end try
                 set childHelp to ""
                 try
-                  set childHelp to help of child as string
+                  set childHelp to my sanitizeText(help of child as string)
                 end try
                 set childVal to ""
                 try
-                  set childVal to value of child as string
+                  set childVal to my sanitizeText(value of child as string)
                 end try
                 set childEnabled to true
                 try
@@ -2610,17 +2646,40 @@ function buildElementQueryScript(
   }
 
   return `
-on toLowerFirst(txt)
+on camelToSpace(txt)
+  -- Converts CamelCase to "camel case" for AppleScript element references
+  -- e.g., "ScrollArea" -> "scroll area", "CheckBox" -> "check box"
   if length of txt is 0 then return txt
-  set firstChar to character 1 of txt
   set lowerChars to "abcdefghijklmnopqrstuvwxyz"
   set upperChars to "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-  set idx to offset of firstChar in upperChars
-  if idx > 0 then
-    return (character idx of lowerChars) & (text 2 thru -1 of txt)
-  end if
-  return txt
-end toLowerFirst
+  set outStr to ""
+  repeat with i from 1 to length of txt
+    set ch to character i of txt
+    set idx to offset of ch in upperChars
+    if idx > 0 then
+      if i > 1 then set outStr to outStr & " "
+      set outStr to outStr & (character idx of lowerChars)
+    else
+      set outStr to outStr & ch
+    end if
+  end repeat
+  return outStr
+end camelToSpace
+
+on sanitizeText(txt)
+  -- Remove newlines and pipe sequences that would corrupt pipe-delimited output
+  if length of txt is 0 then return txt
+  set cleanStr to ""
+  repeat with i from 1 to length of txt
+    set ch to character i of txt
+    if ch is linefeed or ch is return then
+      set cleanStr to cleanStr & " "
+    else
+      set cleanStr to cleanStr & ch
+    end if
+  end repeat
+  return cleanStr
+end sanitizeText
 
 set outputResult to ""
 tell application "System Events"
@@ -2634,7 +2693,7 @@ tell application "System Events"
         set elemRole to role of elem as string
         set elemRoleWord to elemRole
         if elemRoleWord starts with "AX" then set elemRoleWord to text 3 thru -1 of elemRoleWord
-        set elemPathName to my toLowerFirst(elemRoleWord)
+        set elemPathName to my camelToSpace(elemRoleWord)
         -- Count siblings of same role for indexing
         set elemIdx to 0
         set elemCount to 0
@@ -2650,19 +2709,19 @@ tell application "System Events"
         ${roleCondition ? `set skip to false\n        ${roleCondition}\n          ${roleSkip}\n        ${roleEnd}\n        if not skip then` : ""}
         set elemTitle to ""
         try
-          set elemTitle to title of elem as string
+          set elemTitle to my sanitizeText(title of elem as string)
         end try
         set elemDesc to ""
         try
-          set elemDesc to description of elem as string
+          set elemDesc to my sanitizeText(description of elem as string)
         end try
         set elemHelp to ""
         try
-          set elemHelp to help of elem as string
+          set elemHelp to my sanitizeText(help of elem as string)
         end try
         set elemVal to ""
         try
-          set elemVal to value of elem as string
+          set elemVal to my sanitizeText(value of elem as string)
         end try
         set elemEnabled to true
         try
@@ -2707,6 +2766,7 @@ async function findElementBySearch(
     output = child_process.execFileSync("osascript", ["-e", script1], {
       encoding: "utf-8",
       timeout: 15000,
+      maxBuffer: 10 * 1024 * 1024,
     }).trim();
   } catch (e: any) {
     output = "";
@@ -2727,6 +2787,7 @@ async function findElementBySearch(
     output = child_process.execFileSync("osascript", ["-e", script2], {
       encoding: "utf-8",
       timeout: 30000,
+      maxBuffer: 10 * 1024 * 1024,
     }).trim();
   } catch (e: any) {
     output = "";
@@ -2812,7 +2873,7 @@ server.addTool({
       .string()
       .optional()
       .describe("Filter by accessibility role (e.g., 'AXButton', 'AXCheckBox')"),
-    maxDepth: z.number().min(1).max(3).default(1).describe("Traversal depth (1-3, default 1)"),
+    maxDepth: z.number().min(1).max(2).default(1).describe("Traversal depth (1-2, default 1). Depth 2 includes children of each top-level container."),
   }),
   execute: async ({ appName, windowIndex, scope, roleFilter, maxDepth }) => {
     const script = buildElementQueryScript(appName, windowIndex, scope, roleFilter, maxDepth);
@@ -2821,6 +2882,7 @@ server.addTool({
       output = child_process.execFileSync("osascript", ["-e", script], {
         encoding: "utf-8",
         timeout: maxDepth > 1 ? 30000 : 15000,
+        maxBuffer: 10 * 1024 * 1024,
       }).trim();
     } catch (e: any) {
       throw new Error(`uiGetElements failed: ${e.message}`);
@@ -2967,6 +3029,7 @@ server.addTool({
         output = child_process.execFileSync("osascript", ["-e", script], {
           encoding: "utf-8",
           timeout: 30000,
+          maxBuffer: 10 * 1024 * 1024,
         }).trim();
       } catch (e: any) {
         output = e.stderr?.toString() || "";
@@ -3300,34 +3363,6 @@ end tell`;
     }
 
     // Step 2: Get window ID for screencapture via CGWindowListCopyWindowInfo
-    const windowIdScript = `
-set appName to "${escapeForAppleScript(resolvedAppName)}"
-set targetTitle to "${escapeForAppleScript(windowTitle)}"
-
--- Use JXA to get window ID via CGWindowListCopyWindowInfo bridge
-set jsCode to "
-ObjC.import('CoreGraphics');
-var windows = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID);
-var count = $.CFArrayGetCount(windows);
-var targetId = -1;
-for (var i = 0; i < count; i++) {
-  var w = $.CFArrayGetValueAtIndex(windows, i);
-  var owner = $.CFDictionaryGetValue(w, $('kCGWindowOwnerName'));
-  if (owner) {
-    owner = $.CFStringGetCStringPtr(owner, 0);
-    if (owner == '" & appName & "') {
-      var wid = $.CFDictionaryGetValue(w, $('kCGWindowNumber'));
-      if (wid) {
-        targetId = wid;
-        break;
-      }
-    }
-  }
-}
-targetId;
-"
-return do shell script "osascript -l JavaScript -e " & quoted form of jsCode`;
-
     let windowId: number | null = null;
     try {
       // Simpler approach: use window title with screencapture -l
@@ -3348,7 +3383,7 @@ for (var i = 0; i < windows.count; i++) {
   var owner = ObjC.unwrap(w.objectForKey('kCGWindowOwnerName')) || '';
   var wid = ObjC.unwrap(w.objectForKey('kCGWindowNumber')) || 0;
   var name = ObjC.unwrap(w.objectForKey('kCGWindowName')) || '';
-  if (owner === '${escapeForAppleScript(resolvedAppName)}') {
+  if (owner === '${escapeForJXA(resolvedAppName)}') {
     result.push(wid + '|||' + name);
   }
 }
@@ -3376,7 +3411,7 @@ result.join('\\n');`,
     }
 
     // Step 3: Capture screenshot
-    const filePath = path.join(os.tmpdir(), `mcp_uiscreenshot_${Date.now()}.png`);
+    const filePath = path.join(os.tmpdir(), `mcp_uiscreenshot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`);
     try {
       if (windowId) {
         child_process.execFileSync("screencapture", ["-x", `-l${windowId}`, filePath]);
