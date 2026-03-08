@@ -1616,19 +1616,9 @@ server.addTool({
         }
         return `Brightness output: ${output.trim()}`;
       } catch {
-        // Fallback: read from IOKit via system_profiler
-        try {
-          const info = execFileSync(
-            "system_profiler",
-            ["SPDisplaysDataType"],
-            { encoding: "utf-8", timeout: 10000 }
-          );
-          return `Display info:\n${info.trim().substring(0, 500)}`;
-        } catch (e: any) {
-          throw new Error(
-            `Cannot get brightness. Install 'brightness' via Homebrew: brew install brightness. Error: ${e.message}`
-          );
-        }
+        throw new Error(
+          "Cannot get brightness. Install 'brightness' CLI via Homebrew: brew install brightness"
+        );
       }
     } else {
       if (level === undefined)
@@ -1677,11 +1667,18 @@ server.addTool({
       case "quit":
         runAppleScript(`tell application "${esc}" to quit`);
         return `Quit "${appName}".`;
-      case "forceQuit":
-        runAppleScript(
-          `tell application "${esc}" to quit saving no`
-        );
-        return `Force-quit "${appName}" (without saving).`;
+      case "forceQuit": {
+        const { execFileSync } = child_process;
+        try {
+          execFileSync("killall", ["-9", appName!], {
+            encoding: "utf-8",
+            timeout: 5000,
+          });
+        } catch {
+          // killall returns non-zero if process not found
+        }
+        return `Force-killed "${appName}" (SIGKILL).`;
+      }
       case "hide":
         runAppleScript(
           `tell application "System Events" to set visible of process "${esc}" to false`
@@ -1733,8 +1730,8 @@ server.addTool({
   execute: async ({ appName, menuPath }) => {
     const escApp = escapeForAppleScript(appName);
 
-    // First activate the app so its menu bar is showing
-    runAppleScript(`tell application "${escApp}" to activate`);
+    // Activate app and wait for menu bar to render
+    runAppleScript(`tell application "${escApp}" to activate\ndelay 0.3`);
 
     // Build nested menu click AppleScript
     // menuPath[0] = top-level menu, menuPath[1..n-1] = submenus, menuPath[n] = item
@@ -1940,8 +1937,8 @@ server.addTool({
         }
       }
       case "fileChoose": {
-        let script = 'choose file with prompt "Select a file"';
-        if (message) script = `choose file with prompt "${escMsg}"`;
+        let script = 'set theFile to (choose file with prompt "Select a file"';
+        if (message) script = `set theFile to (choose file with prompt "${escMsg}"`;
         if (fileTypes && fileTypes.length > 0) {
           const types = fileTypes
             .map((t) => `"${escapeForAppleScript(t)}"`)
@@ -1950,9 +1947,9 @@ server.addTool({
         }
         if (multipleSelection)
           script += " with multiple selections allowed";
+        script += ")\nPOSIX path of theFile";
         try {
-          const result = runAppleScript(script, 120000);
-          const posix = runAppleScript(`POSIX path of "${escapeForAppleScript(result)}"`);
+          const posix = runAppleScript(script, 120000);
           return `Selected file: ${posix}`;
         } catch (e: any) {
           if (e.message.includes("User canceled"))
@@ -2883,7 +2880,7 @@ server.addTool({
   execute: async ({ action, outputPath, duration, audioEnabled }) => {
     const { execFileSync, spawn } = child_process;
     const fs = require("fs");
-    const pidFile = "/tmp/automation-mcp-screenrecord.pid";
+    const pidFile = `/tmp/mcp-record-${process.env.USER || "default"}.pid`;
 
     if (action === "status") {
       if (fs.existsSync(pidFile)) {
