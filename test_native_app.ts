@@ -136,20 +136,36 @@ function assert(cond: boolean, msg: string): void {
 // ─── Test Setup ───
 
 async function ensureAppRunning(): Promise<void> {
-  const running = run(`osascript -e 'tell application "System Events" to get name of every process whose name is "${APP_NAME}"'`);
-  if (!running.includes(APP_NAME)) {
+  // Check if process is running AND has a window
+  const windowCount = run(`osascript -e '
+    tell application "System Events"
+      if exists process "${APP_NAME}" then
+        return count of windows of process "${APP_NAME}"
+      else
+        return "not_running"
+      end if
+    end tell'`);
+
+  if (windowCount === "not_running" || windowCount === "0") {
+    // Quit first if running without a window (SwiftUI quirk)
+    if (windowCount === "0") {
+      run(`osascript -e 'tell application "${APP_NAME}" to quit'`);
+      await delay(1000);
+    }
+    // Fresh launch
     run(`open "${APP_PATH}"`);
-    await delay(2000);
+    await delay(3000);
   }
-  // Activate and position
+
+  // Activate and position the window
   run(`osascript -e '
     tell application "${APP_NAME}" to activate
-    delay 0.3
+    delay 0.5
     tell application "System Events"
       tell process "${APP_NAME}"
-        tell window 1
-          set position to {${WIN_X}, ${WIN_Y}}
-        end tell
+        if (count of windows) > 0 then
+          set position of window 1 to {${WIN_X}, ${WIN_Y}}
+        end if
       end tell
     end tell'`);
   await delay(500);
