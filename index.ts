@@ -2474,6 +2474,983 @@ end tell`.trim();
   },
 });
 
+// ============== UI ELEMENT AUTOMATION TOOLS ==============
+// Ported from: steipete/macos-automator-mcp, mb-dev/macos-ui-automation-mcp, antbotlab/mac-use-mcp
+
+// Shared type for UI elements
+interface UIElement {
+  path: string;
+  role: string;
+  title: string;
+  description: string;
+  help: string;
+  value: string;
+  enabled: boolean;
+  position: { x: number; y: number };
+  size: { w: number; h: number };
+}
+
+// Helper: Parse pipe-delimited AppleScript output into UIElement array
+function parseElementOutput(rawOutput: string): UIElement[] {
+  const elements: UIElement[] = [];
+  const lines = rawOutput.split("\n").filter((l) => l.includes("|||"));
+  for (const line of lines) {
+    const parts = line.split("|||");
+    if (parts.length < 10) continue;
+    const [pathStr, role, title, desc, help, value, enabled, posX, posY, sizeW, sizeH] = parts;
+    elements.push({
+      path: pathStr.trim(),
+      role: role.trim(),
+      title: title.trim() === "missing value" ? "" : title.trim(),
+      description: desc.trim() === "missing value" ? "" : desc.trim(),
+      help: help.trim() === "missing value" ? "" : help.trim(),
+      value: value.trim() === "missing value" ? "" : value.trim(),
+      enabled: enabled.trim() === "true",
+      position: { x: parseInt(posX) || 0, y: parseInt(posY) || 0 },
+      size: { w: parseInt(sizeW) || 0, h: parseInt(sizeH) || 0 },
+    });
+  }
+  return elements;
+}
+
+// Helper: Convert element path to AppleScript reference
+// "scroll area 2 > checkbox 46" → "checkbox 46 of scroll area 2 of window 1"
+function pathToAxReference(elementPath: string, windowIndex: number = 1): string {
+  const parts = elementPath.split(" > ").map((p) => p.trim());
+  // Reverse: deepest element first, window last
+  return parts.reverse().join(" of ") + ` of window ${windowIndex}`;
+}
+
+// Helper: Build AppleScript to enumerate UI elements with pipe-delimited output
+function buildElementQueryScript(
+  appName: string,
+  windowIndex: number = 1,
+  scope?: string,
+  roleFilter?: string,
+  maxDepth: number = 1
+): string {
+  const escapedApp = escapeForAppleScript(appName);
+  const scopeRef = scope
+    ? `${escapeForAppleScript(scope)} of window ${windowIndex}`
+    : `window ${windowIndex}`;
+
+  // Build the role filter condition
+  const roleCondition = roleFilter
+    ? `if role of elem as string is not "${escapeForAppleScript(roleFilter)}" then`
+    : "";
+  const roleEnd = roleFilter ? "end if" : "";
+  const roleSkip = roleFilter ? "set skip to true" : "";
+
+  // For depth > 1, we need recursive traversal
+  let depthScript = "";
+  if (maxDepth >= 2) {
+    depthScript = `
+          -- Depth 2: enumerate children of each container
+          try
+            set childElems to UI elements of elem
+            repeat with j from 1 to count of childElems
+              set child to item j of childElems
+              try
+                set childRole to role of child as string
+                set childRoleWord to childRole
+                if childRoleWord starts with "AX" then set childRoleWord to text 3 thru -1 of childRoleWord
+                -- Convert CamelCase to space-separated lowercase for path
+                set childPathName to my toLowerFirst(childRoleWord)
+                -- Count siblings of same role for indexing
+                set childIdx to 0
+                set childCount to 0
+                repeat with k from 1 to count of childElems
+                  set sibRole to role of (item k of childElems) as string
+                  if sibRole is childRole then
+                    set childCount to childCount + 1
+                    if k is j then set childIdx to childCount
+                  end if
+                end repeat
+                set childPathStr to elemPathStr & " > " & childPathName
+                if childCount > 1 then set childPathStr to elemPathStr & " > " & childPathName & " " & childIdx
+                ${roleCondition ? `set skip to false\n                ${roleCondition}\n                  ${roleSkip}\n                ${roleEnd}\n                if not skip then` : ""}
+                set childTitle to ""
+                try
+                  set childTitle to title of child as string
+                end try
+                set childDesc to ""
+                try
+                  set childDesc to description of child as string
+                end try
+                set childHelp to ""
+                try
+                  set childHelp to help of child as string
+                end try
+                set childVal to ""
+                try
+                  set childVal to value of child as string
+                end try
+                set childEnabled to true
+                try
+                  set childEnabled to enabled of child
+                end try
+                set childPos to {0, 0}
+                try
+                  set childPos to position of child
+                end try
+                set childSz to {0, 0}
+                try
+                  set childSz to size of child
+                end try
+                set cpx to (item 1 of childPos) as text
+                set cpy to (item 2 of childPos) as text
+                set csx to (item 1 of childSz) as text
+                set csy to (item 2 of childSz) as text
+                set cenb to (childEnabled as text)
+                set outputResult to outputResult & childPathStr & "|||" & childRole & "|||" & childTitle & "|||" & childDesc & "|||" & childHelp & "|||" & childVal & "|||" & cenb & "|||" & cpx & "|||" & cpy & "|||" & csx & "|||" & csy & linefeed
+                ${roleCondition ? "end if" : ""}
+              end try
+            end repeat
+          end try`;
+  }
+
+  return `
+on toLowerFirst(txt)
+  if length of txt is 0 then return txt
+  set firstChar to character 1 of txt
+  set lowerChars to "abcdefghijklmnopqrstuvwxyz"
+  set upperChars to "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  set idx to offset of firstChar in upperChars
+  if idx > 0 then
+    return (character idx of lowerChars) & (text 2 thru -1 of txt)
+  end if
+  return txt
+end toLowerFirst
+
+set outputResult to ""
+tell application "System Events"
+  tell process "${escapedApp}"
+    set frontmost to true
+    delay 0.1
+    set allElems to UI elements of ${scopeRef}
+    repeat with i from 1 to count of allElems
+      set elem to item i of allElems
+      try
+        set elemRole to role of elem as string
+        set elemRoleWord to elemRole
+        if elemRoleWord starts with "AX" then set elemRoleWord to text 3 thru -1 of elemRoleWord
+        set elemPathName to my toLowerFirst(elemRoleWord)
+        -- Count siblings of same role for indexing
+        set elemIdx to 0
+        set elemCount to 0
+        repeat with s from 1 to count of allElems
+          set sibRole to role of (item s of allElems) as string
+          if sibRole is elemRole then
+            set elemCount to elemCount + 1
+            if s is i then set elemIdx to elemCount
+          end if
+        end repeat
+        set elemPathStr to elemPathName
+        if elemCount > 1 then set elemPathStr to elemPathName & " " & elemIdx
+        ${roleCondition ? `set skip to false\n        ${roleCondition}\n          ${roleSkip}\n        ${roleEnd}\n        if not skip then` : ""}
+        set elemTitle to ""
+        try
+          set elemTitle to title of elem as string
+        end try
+        set elemDesc to ""
+        try
+          set elemDesc to description of elem as string
+        end try
+        set elemHelp to ""
+        try
+          set elemHelp to help of elem as string
+        end try
+        set elemVal to ""
+        try
+          set elemVal to value of elem as string
+        end try
+        set elemEnabled to true
+        try
+          set elemEnabled to enabled of elem
+        end try
+        set elemPos to {0, 0}
+        try
+          set elemPos to position of elem
+        end try
+        set elemSz to {0, 0}
+        try
+          set elemSz to size of elem
+        end try
+        set epx to (item 1 of elemPos) as text
+        set epy to (item 2 of elemPos) as text
+        set esx to (item 1 of elemSz) as text
+        set esy to (item 2 of elemSz) as text
+        set eenb to (elemEnabled as text)
+        set outputResult to outputResult & elemPathStr & "|||" & elemRole & "|||" & elemTitle & "|||" & elemDesc & "|||" & elemHelp & "|||" & elemVal & "|||" & eenb & "|||" & epx & "|||" & epy & "|||" & esx & "|||" & esy & linefeed
+        ${roleCondition ? "end if" : ""}
+        ${depthScript}
+      end try
+    end repeat
+  end tell
+end tell
+return outputResult`;
+}
+
+// Helper: Find element by search text across all properties
+async function findElementBySearch(
+  appName: string,
+  search: string,
+  windowIndex: number = 1,
+  roleFilter?: string
+): Promise<UIElement[]> {
+  const searchLower = search.toLowerCase();
+
+  // First try depth 1
+  const script1 = buildElementQueryScript(appName, windowIndex, undefined, roleFilter, 1);
+  let output: string;
+  try {
+    output = child_process.execFileSync("osascript", ["-e", script1], {
+      encoding: "utf-8",
+      timeout: 15000,
+    }).trim();
+  } catch (e: any) {
+    output = "";
+  }
+  let elements = parseElementOutput(output);
+  let matches = elements.filter(
+    (el) =>
+      el.title.toLowerCase().includes(searchLower) ||
+      el.description.toLowerCase().includes(searchLower) ||
+      el.help.toLowerCase().includes(searchLower) ||
+      el.value.toLowerCase().includes(searchLower)
+  );
+  if (matches.length > 0) return matches;
+
+  // If nothing found at depth 1, try depth 2
+  const script2 = buildElementQueryScript(appName, windowIndex, undefined, roleFilter, 2);
+  try {
+    output = child_process.execFileSync("osascript", ["-e", script2], {
+      encoding: "utf-8",
+      timeout: 30000,
+    }).trim();
+  } catch (e: any) {
+    output = "";
+  }
+  elements = parseElementOutput(output);
+  matches = elements.filter(
+    (el) =>
+      el.title.toLowerCase().includes(searchLower) ||
+      el.description.toLowerCase().includes(searchLower) ||
+      el.help.toLowerCase().includes(searchLower) ||
+      el.value.toLowerCase().includes(searchLower)
+  );
+  return matches;
+}
+
+// Tool: uiListWindows
+server.addTool({
+  name: "uiListWindows",
+  description:
+    "List all windows for an application with name, index, position, and size. Returns structured JSON.",
+  parameters: z.object({
+    appName: z.string().describe("Application process name (e.g., 'Bookmap', 'Calculator')"),
+  }),
+  execute: async ({ appName }) => {
+    const escapedApp = escapeForAppleScript(appName);
+    const script = `
+tell application "System Events"
+  tell process "${escapedApp}"
+    set outputStr to ""
+    set allWindows to every window
+    repeat with i from 1 to count of allWindows
+      set w to item i of allWindows
+      set wName to ""
+      try
+        set wName to name of w as string
+      end try
+      set wPos to position of w
+      set wSize to size of w
+      set px to (item 1 of wPos) as text
+      set py to (item 2 of wPos) as text
+      set sw to (item 1 of wSize) as text
+      set sh to (item 2 of wSize) as text
+      set idx to (i as text)
+      set outputStr to outputStr & idx & "|||" & wName & "|||" & px & "|||" & py & "|||" & sw & "|||" & sh & linefeed
+    end repeat
+    return outputStr
+  end tell
+end tell`;
+    try {
+      const raw = runAppleScript(script, 10000);
+      const windows = raw
+        .split("\n")
+        .filter((s) => s.includes("|||"))
+        .map((line) => {
+          const [idx, name, px, py, sw, sh] = line.split("|||");
+          return {
+            index: parseInt(idx),
+            name: name === "missing value" ? "" : name,
+            position: { x: parseInt(px) || 0, y: parseInt(py) || 0 },
+            size: { w: parseInt(sw) || 0, h: parseInt(sh) || 0 },
+          };
+        });
+      return JSON.stringify(windows, null, 2);
+    } catch (e: any) {
+      throw new Error(`uiListWindows failed: ${e.message}`);
+    }
+  },
+});
+
+// Tool: uiGetElements
+server.addTool({
+  name: "uiGetElements",
+  description:
+    "Get UI elements from an app window as structured JSON. Returns role, title, description, help text, value, position, size, and element path for each element. Use 'scope' to drill into containers (e.g., 'scroll area 2'). Critical for Java Swing apps where labels are in description/help, not title.",
+  parameters: z.object({
+    appName: z.string().describe("Application process name"),
+    windowIndex: z.number().default(1).describe("Window index (1-based, default 1)"),
+    scope: z
+      .string()
+      .optional()
+      .describe("Scope into a container element (e.g., 'scroll area 2')"),
+    roleFilter: z
+      .string()
+      .optional()
+      .describe("Filter by accessibility role (e.g., 'AXButton', 'AXCheckBox')"),
+    maxDepth: z.number().min(1).max(3).default(1).describe("Traversal depth (1-3, default 1)"),
+  }),
+  execute: async ({ appName, windowIndex, scope, roleFilter, maxDepth }) => {
+    const script = buildElementQueryScript(appName, windowIndex, scope, roleFilter, maxDepth);
+    let output: string;
+    try {
+      output = child_process.execFileSync("osascript", ["-e", script], {
+        encoding: "utf-8",
+        timeout: maxDepth > 1 ? 30000 : 15000,
+      }).trim();
+    } catch (e: any) {
+      throw new Error(`uiGetElements failed: ${e.message}`);
+    }
+    const elements = parseElementOutput(output);
+    return JSON.stringify(
+      {
+        appName,
+        windowIndex,
+        scope: scope || "(top level)",
+        elementCount: elements.length,
+        elements,
+      },
+      null,
+      2
+    );
+  },
+});
+
+// Tool: uiFindElement
+server.addTool({
+  name: "uiFindElement",
+  description:
+    "Search for UI elements by text match across ALL properties (title, description, help, value). Case-insensitive. Automatically searches depth 1, then depth 2 if no matches found.",
+  parameters: z.object({
+    appName: z.string().describe("Application process name"),
+    search: z.string().describe("Text to search for across all element properties"),
+    windowIndex: z.number().default(1).describe("Window index (1-based, default 1)"),
+    roleFilter: z
+      .string()
+      .optional()
+      .describe("Filter by accessibility role (e.g., 'AXButton', 'AXCheckBox')"),
+  }),
+  execute: async ({ appName, search, windowIndex, roleFilter }) => {
+    const matches = await findElementBySearch(appName, search, windowIndex, roleFilter);
+    return JSON.stringify(
+      {
+        appName,
+        search,
+        matchCount: matches.length,
+        matches,
+      },
+      null,
+      2
+    );
+  },
+});
+
+// Tool: uiClickElement
+server.addTool({
+  name: "uiClickElement",
+  description:
+    "Click a UI element by search text or explicit element path. Supports AXPress, AXConfirm, AXCancel, AXShowMenu, AXRaise actions.",
+  parameters: z.object({
+    appName: z.string().describe("Application process name"),
+    search: z
+      .string()
+      .optional()
+      .describe("Search text to find element (searches title, description, help, value)"),
+    elementPath: z
+      .string()
+      .optional()
+      .describe("Explicit element path (e.g., 'scroll area 2 > checkbox 46')"),
+    windowIndex: z.number().default(1).describe("Window index (1-based, default 1)"),
+    action: z
+      .enum(["AXPress", "AXConfirm", "AXCancel", "AXShowMenu", "AXRaise"])
+      .default("AXPress")
+      .describe("Accessibility action to perform (default: AXPress)"),
+  }),
+  execute: async ({ appName, search, elementPath, windowIndex, action }) => {
+    if (!search && !elementPath) {
+      throw new Error("Either 'search' or 'elementPath' must be provided");
+    }
+
+    const escapedApp = escapeForAppleScript(appName);
+    let axRef: string;
+    let elementDesc = "";
+
+    if (elementPath) {
+      // Direct path reference
+      axRef = pathToAxReference(elementPath, windowIndex);
+      elementDesc = elementPath;
+    } else {
+      // Search for element
+      const matches = await findElementBySearch(appName, search!, windowIndex);
+      if (matches.length === 0) {
+        throw new Error(`No element found matching "${search}"`);
+      }
+      const target = matches[0];
+      axRef = pathToAxReference(target.path, windowIndex);
+      elementDesc = target.description || target.help || target.title || target.path;
+    }
+
+    const script = `
+tell application "System Events"
+  tell process "${escapedApp}"
+    set frontmost to true
+    delay 0.1
+    perform action "${action}" of ${axRef}
+  end tell
+end tell
+return "ok"`;
+
+    try {
+      runAppleScript(script, 10000);
+      return `Clicked "${elementDesc}" (action: ${action})`;
+    } catch (e: any) {
+      throw new Error(`uiClickElement failed: ${e.message}`);
+    }
+  },
+});
+
+// Tool: uiSetValue
+server.addTool({
+  name: "uiSetValue",
+  description:
+    "Set the value of a UI element with type-aware handling and verification. Handles checkboxes (toggle only if needed), text fields, sliders, and combo boxes.",
+  parameters: z.object({
+    appName: z.string().describe("Application process name"),
+    search: z
+      .string()
+      .optional()
+      .describe("Search text to find element"),
+    elementPath: z
+      .string()
+      .optional()
+      .describe("Explicit element path (e.g., 'scroll area 2 > checkbox 46')"),
+    value: z.union([z.string(), z.number(), z.boolean()]).describe("Value to set"),
+    windowIndex: z.number().default(1).describe("Window index (1-based, default 1)"),
+  }),
+  execute: async ({ appName, search, elementPath, value, windowIndex }) => {
+    if (!search && !elementPath) {
+      throw new Error("Either 'search' or 'elementPath' must be provided");
+    }
+
+    const escapedApp = escapeForAppleScript(appName);
+    let target: UIElement;
+
+    if (elementPath) {
+      // We need to get element info for the path to know its role
+      const script = buildElementQueryScript(appName, windowIndex, undefined, undefined, 2);
+      let output: string;
+      try {
+        output = child_process.execFileSync("osascript", ["-e", script], {
+          encoding: "utf-8",
+          timeout: 30000,
+        }).trim();
+      } catch (e: any) {
+        output = e.stderr?.toString() || "";
+      }
+      const elements = parseElementOutput(output);
+      const found = elements.find((el) => el.path === elementPath);
+      if (!found) throw new Error(`Element not found at path: ${elementPath}`);
+      target = found;
+    } else {
+      const matches = await findElementBySearch(appName, search!, windowIndex);
+      if (matches.length === 0) throw new Error(`No element found matching "${search}"`);
+      target = matches[0];
+    }
+
+    const axRef = pathToAxReference(target.path, windowIndex);
+    const elementDesc = target.description || target.help || target.title || target.path;
+    const oldValue = target.value;
+
+    // Type-aware value setting
+    if (target.role === "AXCheckBox") {
+      // Checkbox: toggle only if current value differs from desired
+      const desiredVal = value === true || value === 1 || value === "1" || value === "true" ? 1 : 0;
+      const currentVal = parseInt(target.value) || 0;
+      if (currentVal === desiredVal) {
+        return `"${elementDesc}" already has value ${desiredVal} — no change needed`;
+      }
+      const script = `
+tell application "System Events"
+  tell process "${escapedApp}"
+    set frontmost to true
+    delay 0.1
+    click ${axRef}
+    delay 0.2
+    set newVal to value of ${axRef}
+    return newVal as string
+  end tell
+end tell`;
+      const newVal = runAppleScript(script, 10000);
+      return `Set "${elementDesc}" to ${newVal} (was ${oldValue})`;
+    } else {
+      // Text field, slider, combo box: set value directly
+      const valStr = typeof value === "string" ? `"${escapeForAppleScript(value)}"` : String(value);
+      const script = `
+tell application "System Events"
+  tell process "${escapedApp}"
+    set frontmost to true
+    delay 0.1
+    set value of ${axRef} to ${valStr}
+    delay 0.2
+    set newVal to value of ${axRef}
+    return newVal as string
+  end tell
+end tell`;
+      try {
+        const newVal = runAppleScript(script, 10000);
+        return `Set "${elementDesc}" to ${newVal} (was ${oldValue})`;
+      } catch (e: any) {
+        throw new Error(`uiSetValue failed for "${elementDesc}": ${e.message}`);
+      }
+    }
+  },
+});
+
+// Tool: uiTypeIntoElement
+server.addTool({
+  name: "uiTypeIntoElement",
+  description:
+    "Type text into a specific UI element (text field, search box) by focusing it first. Optionally clears existing content before typing.",
+  parameters: z.object({
+    appName: z.string().describe("Application process name"),
+    search: z
+      .string()
+      .optional()
+      .describe("Search text to find the target element"),
+    elementPath: z
+      .string()
+      .optional()
+      .describe("Explicit element path"),
+    text: z.string().describe("Text to type into the element"),
+    clearFirst: z.boolean().default(true).describe("Clear existing content before typing (default: true)"),
+    windowIndex: z.number().default(1).describe("Window index (1-based, default 1)"),
+  }),
+  execute: async ({ appName, search, elementPath, text, clearFirst, windowIndex }) => {
+    if (!search && !elementPath) {
+      throw new Error("Either 'search' or 'elementPath' must be provided");
+    }
+
+    const escapedApp = escapeForAppleScript(appName);
+    let axRef: string;
+    let elementDesc = "";
+
+    if (elementPath) {
+      axRef = pathToAxReference(elementPath, windowIndex);
+      elementDesc = elementPath;
+    } else {
+      const matches = await findElementBySearch(appName, search!, windowIndex);
+      if (matches.length === 0) throw new Error(`No element found matching "${search}"`);
+      const target = matches[0];
+      axRef = pathToAxReference(target.path, windowIndex);
+      elementDesc = target.description || target.help || target.title || target.path;
+    }
+
+    const escapedText = escapeForAppleScript(text);
+    const clearScript = clearFirst
+      ? `
+    keystroke "a" using command down
+    delay 0.1
+    key code 51 -- delete/backspace
+    delay 0.1`
+      : "";
+
+    const script = `
+tell application "System Events"
+  tell process "${escapedApp}"
+    set frontmost to true
+    delay 0.1
+    set focused of ${axRef} to true
+    delay 0.2
+    ${clearScript}
+    keystroke "${escapedText}"
+  end tell
+end tell
+return "ok"`;
+
+    try {
+      runAppleScript(script, 15000);
+      return `Typed "${text}" into "${elementDesc}"${clearFirst ? " (cleared first)" : ""}`;
+    } catch (e: any) {
+      throw new Error(`uiTypeIntoElement failed: ${e.message}`);
+    }
+  },
+});
+
+// Tool: executeScript
+server.addTool({
+  name: "executeScript",
+  description:
+    "Execute arbitrary AppleScript or JXA (JavaScript for Automation) code. Powerful escape hatch for complex automation that can't be done with other tools.",
+  parameters: z.object({
+    script: z.string().describe("The script code to execute"),
+    language: z
+      .enum(["applescript", "jxa"])
+      .default("applescript")
+      .describe("Script language: applescript or jxa (JavaScript for Automation)"),
+    timeoutSeconds: z
+      .number()
+      .min(1)
+      .max(120)
+      .default(30)
+      .describe("Timeout in seconds (default: 30, max: 120)"),
+  }),
+  execute: async ({ script, language, timeoutSeconds }) => {
+    const timeoutMs = timeoutSeconds * 1000;
+    const args =
+      language === "jxa"
+        ? ["-l", "JavaScript", "-e", script]
+        : ["-e", script];
+    try {
+      const result = child_process.execFileSync("osascript", args, {
+        encoding: "utf-8",
+        timeout: timeoutMs,
+      });
+      return result.trim() || "(script completed with no output)";
+    } catch (e: any) {
+      // osascript may output to stderr for "log" statements
+      const stderr = e.stderr?.toString()?.trim() || "";
+      if (stderr && e.status === 0) return stderr;
+      throw new Error(
+        `Script execution failed (${language}): ${e.message}${stderr ? "\nstderr: " + stderr : ""}`
+      );
+    }
+  },
+});
+
+// Tool: appOverview
+server.addTool({
+  name: "appOverview",
+  description:
+    "Quick overview of an app's UI structure — windows, top-level element roles and counts. Useful for initial exploration before drilling in with uiGetElements.",
+  parameters: z.object({
+    appName: z.string().describe("Application process name"),
+  }),
+  execute: async ({ appName }) => {
+    const escapedApp = escapeForAppleScript(appName);
+    const script = `
+tell application "System Events"
+  tell process "${escapedApp}"
+    set winCount to count of windows
+    set outputStr to ""
+    repeat with i from 1 to winCount
+      set w to window i
+      set wName to ""
+      try
+        set wName to name of w as string
+      end try
+      set elems to UI elements of w
+      set roleCounts to ""
+      set roleList to {}
+      set countList to {}
+      repeat with e in elems
+        set r to role of e as string
+        set found to false
+        repeat with idx from 1 to count of roleList
+          if item idx of roleList is r then
+            set item idx of countList to (item idx of countList) + 1
+            set found to true
+            exit repeat
+          end if
+        end repeat
+        if not found then
+          set end of roleList to r
+          set end of countList to 1
+        end if
+      end repeat
+      set summary to ""
+      repeat with idx from 1 to count of roleList
+        if idx > 1 then set summary to summary & ", "
+        set summary to summary & (item idx of roleList) & ":" & (item idx of countList)
+      end repeat
+      set idxStr to (i as text)
+      set elemCntStr to ((count of elems) as text)
+      set outputStr to outputStr & idxStr & "|||" & wName & "|||" & elemCntStr & "|||" & summary & linefeed
+    end repeat
+    return outputStr
+  end tell
+end tell`;
+    try {
+      const raw = runAppleScript(script, 15000);
+      const windows = raw
+        .split("\n")
+        .filter((l) => l.includes("|||"))
+        .map((line) => {
+          const [idx, name, elemCount, summary] = line.split("|||");
+          const elementSummary: Record<string, number> = {};
+          if (summary) {
+            summary.split(", ").forEach((pair) => {
+              const [role, count] = pair.split(":");
+              if (role && count) {
+                // Clean role name: AXButton → button
+                const cleanRole = role.startsWith("AX") ? role.slice(2).toLowerCase() : role.toLowerCase();
+                elementSummary[cleanRole] = parseInt(count) || 0;
+              }
+            });
+          }
+          return {
+            index: parseInt(idx),
+            name: name === "missing value" ? "" : name,
+            totalElements: parseInt(elemCount) || 0,
+            elementSummary,
+          };
+        });
+
+      return JSON.stringify(
+        {
+          processName: appName,
+          windowCount: windows.length,
+          windows,
+        },
+        null,
+        2
+      );
+    } catch (e: any) {
+      throw new Error(`appOverview failed: ${e.message}`);
+    }
+  },
+});
+
+// Tool: uiScreenshot
+server.addTool({
+  name: "uiScreenshot",
+  description:
+    "Screenshot the active (frontmost) window or a specific app's window, returning both the image AND window location/bounds metadata. Auto-discovers the active window without needing its name or ID. Ideal for automation workflows.",
+  parameters: z.object({
+    appName: z
+      .string()
+      .optional()
+      .describe("Target app (default: frontmost app)"),
+    windowIndex: z
+      .number()
+      .default(1)
+      .describe("Which window to capture (1-based, default 1 = frontmost)"),
+    includeLocation: z
+      .boolean()
+      .default(true)
+      .describe("Include position/size metadata in response (default: true)"),
+  }),
+  execute: async ({ appName, windowIndex, includeLocation }) => {
+    // Step 1: Get window info (app name, title, position, size)
+    const infoScript = appName
+      ? `
+tell application "System Events"
+  tell process "${escapeForAppleScript(appName)}"
+    set w to window ${windowIndex}
+    set wName to ""
+    try
+      set wName to name of w as string
+    end try
+    set wPos to position of w
+    set wSz to size of w
+    return name of current application & "|||" & "${escapeForAppleScript(appName)}" & "|||" & wName & "|||" & (item 1 of wPos) & "|||" & (item 2 of wPos) & "|||" & (item 1 of wSz) & "|||" & (item 2 of wSz)
+  end tell
+end tell`
+      : `
+tell application "System Events"
+  set frontApp to first process whose frontmost is true
+  set appName to name of frontApp
+  set w to window ${windowIndex} of frontApp
+  set wName to ""
+  try
+    set wName to name of w as string
+  end try
+  set wPos to position of w
+  set wSz to size of w
+  return name of current application & "|||" & appName & "|||" & wName & "|||" & (item 1 of wPos) & "|||" & (item 2 of wPos) & "|||" & (item 1 of wSz) & "|||" & (item 2 of wSz)
+end tell`;
+
+    let resolvedAppName: string;
+    let windowTitle: string;
+    let pos = { x: 0, y: 0 };
+    let sz = { w: 0, h: 0 };
+
+    try {
+      const raw = runAppleScript(infoScript, 10000);
+      const parts = raw.split("|||");
+      resolvedAppName = parts[1] || appName || "Unknown";
+      windowTitle = parts[2] === "missing value" ? "" : parts[2] || "";
+      pos = { x: parseInt(parts[3]) || 0, y: parseInt(parts[4]) || 0 };
+      sz = { w: parseInt(parts[5]) || 0, h: parseInt(parts[6]) || 0 };
+    } catch (e: any) {
+      throw new Error(`Could not get window info: ${e.message}`);
+    }
+
+    // Step 2: Get window ID for screencapture via CGWindowListCopyWindowInfo
+    const windowIdScript = `
+set appName to "${escapeForAppleScript(resolvedAppName)}"
+set targetTitle to "${escapeForAppleScript(windowTitle)}"
+
+-- Use JXA to get window ID via CGWindowListCopyWindowInfo bridge
+set jsCode to "
+ObjC.import('CoreGraphics');
+var windows = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID);
+var count = $.CFArrayGetCount(windows);
+var targetId = -1;
+for (var i = 0; i < count; i++) {
+  var w = $.CFArrayGetValueAtIndex(windows, i);
+  var owner = $.CFDictionaryGetValue(w, $('kCGWindowOwnerName'));
+  if (owner) {
+    owner = $.CFStringGetCStringPtr(owner, 0);
+    if (owner == '" & appName & "') {
+      var wid = $.CFDictionaryGetValue(w, $('kCGWindowNumber'));
+      if (wid) {
+        targetId = wid;
+        break;
+      }
+    }
+  }
+}
+targetId;
+"
+return do shell script "osascript -l JavaScript -e " & quoted form of jsCode`;
+
+    let windowId: number | null = null;
+    try {
+      // Simpler approach: use window title with screencapture -l
+      // Get window list via bash
+      const listOutput = child_process.execFileSync(
+        "osascript",
+        [
+          "-l",
+          "JavaScript",
+          "-e",
+          `
+ObjC.import('CoreGraphics');
+ObjC.import('CoreFoundation');
+var windows = ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0));
+var result = [];
+for (var i = 0; i < windows.count; i++) {
+  var w = windows.objectAtIndex(i);
+  var owner = ObjC.unwrap(w.objectForKey('kCGWindowOwnerName')) || '';
+  var wid = ObjC.unwrap(w.objectForKey('kCGWindowNumber')) || 0;
+  var name = ObjC.unwrap(w.objectForKey('kCGWindowName')) || '';
+  if (owner === '${escapeForAppleScript(resolvedAppName)}') {
+    result.push(wid + '|||' + name);
+  }
+}
+result.join('\\n');`,
+        ],
+        { encoding: "utf-8", timeout: 10000 }
+      ).trim();
+
+      if (listOutput) {
+        const windowLines = listOutput.split("\n").filter((l) => l.includes("|||"));
+        // Match by title if possible, otherwise take the Nth window
+        if (windowTitle) {
+          const match = windowLines.find((l) => l.includes(windowTitle));
+          if (match) windowId = parseInt(match.split("|||")[0]);
+        }
+        if (!windowId && windowLines.length >= windowIndex) {
+          windowId = parseInt(windowLines[windowIndex - 1].split("|||")[0]);
+        }
+        if (!windowId && windowLines.length > 0) {
+          windowId = parseInt(windowLines[0].split("|||")[0]);
+        }
+      }
+    } catch {
+      // Fall back to region-based screenshot
+    }
+
+    // Step 3: Capture screenshot
+    const filePath = path.join(os.tmpdir(), `mcp_uiscreenshot_${Date.now()}.png`);
+    try {
+      if (windowId) {
+        child_process.execFileSync("screencapture", ["-x", `-l${windowId}`, filePath]);
+      } else {
+        // Fallback: region-based capture using position/size
+        if (sz.w > 0 && sz.h > 0) {
+          child_process.execFileSync("screencapture", [
+            "-x",
+            `-R${pos.x},${pos.y},${sz.w},${sz.h}`,
+            filePath,
+          ]);
+        } else {
+          // Last resort: full screen
+          child_process.execFileSync("screencapture", ["-x", filePath]);
+        }
+      }
+    } catch (e: any) {
+      throw new Error(`Screenshot capture failed: ${e.message}`);
+    }
+
+    if (!require("fs").existsSync(filePath)) {
+      throw new Error("Screenshot file was not created");
+    }
+
+    // Step 4: Get screen size for context
+    let screenW = 0, screenH = 0;
+    try {
+      const screenInfo = runAppleScript(
+        'tell application "Finder" to get bounds of window of desktop',
+        5000
+      );
+      const bounds = screenInfo.split(", ").map((s) => parseInt(s));
+      if (bounds.length >= 4) {
+        screenW = bounds[2];
+        screenH = bounds[3];
+      }
+    } catch {
+      // Non-critical
+    }
+
+    try {
+      const img = await imageContent({ path: filePath });
+
+      if (includeLocation) {
+        const locationInfo = JSON.stringify({
+          appName: resolvedAppName,
+          windowTitle,
+          windowIndex,
+          position: pos,
+          size: sz,
+          screenSize: { w: screenW, h: screenH },
+          windowId: windowId || null,
+        }, null, 2);
+
+        // Return both image and location metadata as ContentResult
+        return {
+          content: [
+            { type: "text" as const, text: `Window Location:\n${locationInfo}` },
+            img,
+          ],
+        };
+      }
+
+      return img;
+    } finally {
+      try {
+        require("fs").unlinkSync(filePath);
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  },
+});
+
 // Tool 37: Window Tiling
 server.addTool({
   name: "windowTiling",
